@@ -8,6 +8,15 @@ changes no exit gate.
 Per [AGENTS.md](../../AGENTS.md) §6 the title and build are not named. No shader bytes, offsets,
 hashes or file names from the build are recorded here, only counts and conclusions.
 
+## Relation to the earlier scan
+
+ADR 0008 (evidence table) and the roadmap already record a read-only **structural** scan of the
+same components from earlier on 2026-11-28, done without extraction or execution. This is a
+**second scan** of the same files. It differs in three ways: the containers were extracted to a
+local temporary directory (deleted afterwards), each one was run through `bx-cli shader` after the
+`NOBC` classifier fix in `[Unreleased]`, and it reports the 12-byte `PRIV` chunk. The counts agree
+with the first scan.
+
 ## Method
 
 - **Scope:** every PE32+ file in the title's package (the executable and its DLLs). The title's

@@ -17,8 +17,25 @@ replacement for a whole component exists, substitute it instead of translating i
 |---|---|---|
 | Is there a macOS DXC? | **No.** The DXC releases ship Windows and Linux packages only, and there is no Homebrew formula. | GitHub releases `v1.9.2609`, `v1.10.2605.37`, `v1.9.2607` |
 | Does Windows DXC run where the shims run? | **Yes.** The shims are Windows DLLs inside CrossOver, and `dxc.exe` from DXC `v1.9.2609` already runs under the CrossOver Wine loader (see `test_d3dmetal_gpu_limits/shaders/compile.sh`). A translator in `d3d12_xs` can load `dxcompiler.dll` in-process. | Repository script; run on 2026-11-28 |
-| Is `dxil.dll` needed to sign DXIL? | **No.** `fill_cs66.hlsl` compiled with `-T cs_6_6` from a directory holding `dxc.exe`, `dxcompiler.dll` **and** `dxil.dll`, and from one holding only `dxc.exe` and `dxcompiler.dll`, gives **byte-identical** 3092-byte containers with the container hash set. `dxcompiler.dll` validates and signs on its own. | Run on Apple Silicon, CrossOver 26.3, 2026-11-28 (evidence class A) |
+| Is `dxil.dll` needed to sign DXIL? | **No.** Compiled with and without `dxil.dll` (recipe below), the outputs are **byte-identical** 3092-byte containers with the container hash set. `dxcompiler.dll` validates and signs on its own. | Run on Apple Silicon, CrossOver 26.3, 2026-11-28 (evidence class A) |
 | Does D3DMetal accept that DXIL? | **Yes.** The repository's committed shaders come from the same DXC release, and the shader-gate fixtures pass in a D3DMetal bottle. | `test_shader_gate` live runs |
+
+**Reproducing the `dxil.dll` result.**
+
+- Package: `dxc_2026_09_29.zip` from release `v1.9.2609`, SHA-256
+  `ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1` (the package
+  `compile.sh` already records).
+- Source: `shader-transpiler/crates/d3dmetal-harness/probe/shaders/fill_cs66.hlsl`, SHA-256
+  `cf03fef353b09de5fd6e31b99cc6174a506f84bb210b65406e25d9a79db6f702`.
+- Two directories: `with-dxil/` holding `bin/x64/dxc.exe`, `dxcompiler.dll` and `dxil.dll`, and
+  `without-dxil/` holding only `dxc.exe` and `dxcompiler.dll`. In each, run
+  `"$WINE" <dir>/dxc.exe -nologo -T cs_6_6 -E main -Fo <dir>.cso fill_cs66.hlsl`, with `$WINE` the
+  CrossOver Wine loader (paths given in Wine's `Z:` form).
+- Both outputs: 3092 bytes, SHA-256
+  `7df11b637ebc7598d14bf916bc908bb3fe7b9034ea49ad42006366dba317d0dd`, header hash
+  `8f7f5a93…` (the same as the committed `fill_cs66.h`).
+- **Control:** the bottle used contains no other `dxil.dll`, and neither does the CrossOver
+  installation, so the `without-dxil` run could not pick one up from the DLL search path.
 
 **Licensing.** The `v1.9.2609` package carries three licence files: `LICENCE-MIT.txt`,
 `LICENSE-LLVM.txt` and `LICENSE-MS.txt`. `LICENSE-MS.txt` allows redistributing listed
@@ -46,15 +63,24 @@ it.
   - The current FidelityFX SDK (2.x) is under an AMD licence that allows redistribution but forbids
     reverse engineering, decompilation and disassembly, and ships the upscalers as signed prebuilt
     DLLs. It is not a clean fit for a GPL-3.0-or-later project.
-  - **FidelityFX SDK `v1.1.4` is MIT** and contains the full **FSR 3.1** upscaler source (29 shader
-    and header files) and the FFX API loader. That is the candidate source.
-- **Version gap.** The console upscaler implements **FSR 4**, AMD's ML upscaler (FP8 and INT8
-  model passes), and also exposes the FSR 3 effect. FSR 4 is not available as source, so a
+  - **FidelityFX SDK `v1.1.4` is MIT for its source files** and contains the full **FSR 3.1**
+    upscaler source (29 shader and header files) and the FFX API loader. That is the candidate
+    source. **Reuse would cover those MIT source files only.** The same tag also contains
+    `PrebuiltSignedDLL/` (signed DX12 and Vulkan DLLs with their import libraries) and two
+    vendored DXC copies (`framework/cauldron/framework/libs/dxc/` and
+    `sdk/tools/ffx_shader_compiler/libs/dxc/`), each with its own `LICENSE-MS.txt`. The FSR 3.1
+    shaders are built through `ffx_shader_compiler`, so building them from that tree raises the same
+    DXC licensing question as section 1, and the shaders would be compiled with a separately
+    supplied or source-built DXC instead.
+- **Version gap.** *Observed* (strings and exports read from the console upscaler DLL, no code
+  executed): the effect identifiers `FFX_EFFECT_FSR4UPSCALER` and `FFX_EFFECT_FSR3UPSCALER`, model
+  class names for an INT8 FSR 4 upscaler, and many FP8 model-pass names. *Inferred* from those:
+  the console upscaler implements **FSR 4**, AMD's ML upscaler, and also exposes the FSR 3
+  effect. FSR 4 is not available as source, so a
   substitute can offer FSR 3.1 only. This relies on the title accepting FSR 3 through the FFX API's
   version query and selection, which is **not yet verified**.
-- **Console descriptors.** No Xbox FidelityFX headers are in the authorized GDK material. The
-  console backend descriptor types the title passes have to come from call-site observation when it
-  first creates an upscaler context.
+- **Console descriptors.** The console backend descriptor types the title passes are not public.
+  They have to come from call-site observation when it first creates an upscaler context.
 
 ## Next steps
 
