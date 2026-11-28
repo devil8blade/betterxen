@@ -194,8 +194,6 @@ static LUID STDMETHODCALLTYPE x_Device_43(void* self) {
     return result;
 }
 /* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_44(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 44u, "CreatePlacedResourceX"); return E_NOTIMPL; }
-/* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_45(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 45u, "CreateComponentPlacedResourceX"); return E_NOTIMPL; }
 /* Xbox-only method */
 static UINT64 STDMETHODCALLTYPE x_Device_46(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 46u, "CreatePlacedShaderResourceViewX"); return 0; }
@@ -461,8 +459,6 @@ static HRESULT STDMETHODCALLTYPE x_Device_131(void*) { BX_VTABLE_STUB_LOG("XboxD
 /* Xbox-only method */
 static UINT64 STDMETHODCALLTYPE x_Device_132(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 132u, "ReportGpuHaltX"); return 0; }
 /* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_133(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 133u, "CreatePlacedResourceX1"); return E_NOTIMPL; }
-/* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_134(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 134u, "CreateComponentPlacedResourceX2"); return E_NOTIMPL; }
 /* Xbox-only method */
 static UINT64 STDMETHODCALLTYPE x_Device_135(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 135u, "IsLiveDebugServerActiveX"); return 0; }
@@ -518,7 +514,7 @@ const void* const kDeviceTable[] = {
     reinterpret_cast<const void*>(&x_Device_41),
     reinterpret_cast<const void*>(&x_Device_42),
     reinterpret_cast<const void*>(&x_Device_43),
-    reinterpret_cast<const void*>(&x_Device_44),
+    reinterpret_cast<const void*>(&bx_xbox_device_create_placed_resource_x),
     reinterpret_cast<const void*>(&x_Device_45),
     reinterpret_cast<const void*>(&x_Device_46),
     reinterpret_cast<const void*>(&x_Device_47),
@@ -607,7 +603,7 @@ const void* const kDeviceTable[] = {
     reinterpret_cast<const void*>(&x_Device_130),
     reinterpret_cast<const void*>(&x_Device_131),
     reinterpret_cast<const void*>(&x_Device_132),
-    reinterpret_cast<const void*>(&x_Device_133),
+    reinterpret_cast<const void*>(&bx_xbox_device_create_placed_resource_x1),
     reinterpret_cast<const void*>(&x_Device_134),
     reinterpret_cast<const void*>(&x_Device_135),
     reinterpret_cast<const void*>(&x_Device_136),
@@ -631,7 +627,7 @@ const IID kDeviceIids[] = {
     {0xc4fec28f, 0x7966, 0x4e95, {0x9f, 0x94, 0xf4, 0x31, 0xcb, 0x56, 0xc3, 0xb8}}, /* ID3D12Object */
 };
 
-/* ID3D12Device11: 139 slots (75 forwarded, 8 shared, 56 stubs); hosted on ID3D12Device10. */
+/* ID3D12Device11: 139 slots (75 forwarded, 10 shared, 54 stubs); hosted on ID3D12Device10. */
 const IID kHostDevice = __uuidof(ID3D12Device10);
 
 static HRESULT STDMETHODCALLTYPE x_Resource_3(void* self, REFGUID a0, UINT * a1, void * a2) {
@@ -661,10 +657,6 @@ static void STDMETHODCALLTYPE x_Resource_9(void* self, UINT a0, const D3D12_RANG
 static D3D12_RESOURCE_DESC* STDMETHODCALLTYPE x_Resource_10(void* self, D3D12_RESOURCE_DESC * a0) {
     BX_D3D_TRACE("XboxResource", "GetDesc");
     return bx_xbox_host<ID3D12Resource>(self)->GetDesc(a0);
-}
-static D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE x_Resource_11(void* self) {
-    BX_D3D_TRACE("XboxResource", "GetGPUVirtualAddress");
-    return bx_xbox_host<ID3D12Resource>(self)->GetGPUVirtualAddress();
 }
 static HRESULT STDMETHODCALLTYPE x_Resource_12(void* self, UINT a0, const D3D12_BOX * a1, const void * a2, UINT a3, UINT a4) {
     BX_D3D_TRACE("XboxResource", "WriteToSubresource");
@@ -708,7 +700,7 @@ const void* const kResourceTable[] = {
     reinterpret_cast<const void*>(&x_Resource_8),
     reinterpret_cast<const void*>(&x_Resource_9),
     reinterpret_cast<const void*>(&x_Resource_10),
-    reinterpret_cast<const void*>(&x_Resource_11),
+    reinterpret_cast<const void*>(&bx_xbox_resource_get_gpu_virtual_address),
     reinterpret_cast<const void*>(&x_Resource_12),
     reinterpret_cast<const void*>(&x_Resource_13),
     reinterpret_cast<const void*>(&x_Resource_14),
@@ -728,7 +720,7 @@ const IID kResourceIids[] = {
     {0xc4fec28f, 0x7966, 0x4e95, {0x9f, 0x94, 0xf4, 0x31, 0xcb, 0x56, 0xc3, 0xb8}}, /* ID3D12Object */
 };
 
-/* ID3D12Resource2: 20 slots (13 forwarded, 4 shared, 3 stubs); hosted on ID3D12Resource2. */
+/* ID3D12Resource2: 20 slots (12 forwarded, 5 shared, 3 stubs); hosted on ID3D12Resource2. */
 const IID kHostResource = __uuidof(ID3D12Resource2);
 
 static HRESULT STDMETHODCALLTYPE x_Heap_3(void* self, REFGUID a0, UINT * a1, void * a2) {

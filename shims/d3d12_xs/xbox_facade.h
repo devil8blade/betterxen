@@ -162,6 +162,17 @@ HRESULT STDMETHODCALLTYPE bx_xbox_device_wait_frame_event_x(void* self, UINT typ
                                                             const BxXboxFrameWaitList* waits, UINT flags,
                                                             UINT64* token);
 
+/* Resources at a title-chosen GPU address (placed_x.cpp): host shadow resources. */
+HRESULT STDMETHODCALLTYPE bx_xbox_device_create_placed_resource_x(void* self, D3D12_GPU_VIRTUAL_ADDRESS location,
+                                                                  const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+                                                                  const D3D12_CLEAR_VALUE* clear, REFIID riid, void** ppv);
+HRESULT STDMETHODCALLTYPE bx_xbox_device_create_placed_resource_x1(void* self, D3D12_GPU_VIRTUAL_ADDRESS location,
+                                                                   const D3D12_RESOURCE_DESC1* desc, UINT initial_layout,
+                                                                   const D3D12_CLEAR_VALUE* clear, REFIID riid, void** ppv);
+D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE bx_xbox_resource_get_gpu_virtual_address(void* self);
+/* Drops the shadow record of a destroyed resource. */
+void bx_xbox_placed_forget(IUnknown* host);
+
 /* Command-list slots whose structures carry interface pointers, unwrapped before the host call.
    The Xbox ResourceBarrier also returns the actions it took; 0 is returned. */
 UINT STDMETHODCALLTYPE bx_xbox_list_resource_barrier(void* self, UINT count, const D3D12_RESOURCE_BARRIER* barriers);

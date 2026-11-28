@@ -25,7 +25,7 @@ namespace {
 constexpr int kQueryInterface = 0, kAddRef = 1, kRelease = 2;
 constexpr int kDevGetNodeCount = 7, kDevCheckFeatureSupport = 13, kDevGetResourceAllocationInfo = 25;
 constexpr int kDevCreateHeap = 28, kDevCreatePlacedResource = 29, kDevGetAdapterLuid = 43;
-constexpr int kDevCreatePlacedResourceX = 44;      // first Xbox-only slot after ID3D12Device's PC methods
+constexpr int kDevCreateComponentPlacedResourceX = 45;   // an Xbox-only slot still stubbed
 constexpr int kDevCreateCommittedResource1 = 92;   // ID3D12Device4; PC places it elsewhere
 constexpr int kResMap = 8, kResGetDesc = 10, kResGetGpuVirtualAddress = 11;
 // Object offsets (Series header): m_RefCount at +12; ID3D12Device's m_OutOfLineFlags at +24.
@@ -145,8 +145,8 @@ int main() {
     CHECK(info.SizeInBytes == pc_info.SizeInBytes && info.Alignment == pc_info.Alignment && info.SizeInBytes >= 65536,
           "GetResourceAllocationInfo (16-byte struct, hidden pointer) matches the PC device");
 
-    // The first Xbox-only slot is a logged stub.
-    CHECK(slot<StubFn>(dev, kDevCreatePlacedResourceX)(dev) == E_NOTIMPL, "CreatePlacedResourceX is a stub");
+    // An Xbox-only slot without an implementation is a logged stub.
+    CHECK(slot<StubFn>(dev, kDevCreateComponentPlacedResourceX)(dev) == E_NOTIMPL, "CreateComponentPlacedResourceX is a stub");
 
     // A Device4 method at its Xbox slot creates an Xbox-layout resource.
     D3D12_HEAP_PROPERTIES upload{};
@@ -239,6 +239,28 @@ int main() {
         CHECK(slot<CreateFenceFn>(dev, kDevCreateFence)(dev, 0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), &fence) == S_OK,
               "CreateFence at slot 36");
 
+        // A buffer placed at a title-chosen address (CreatePlacedResourceX, slot 44) reports that
+        // address and carries the title memory's contents to the GPU: it replaces `src` below.
+        using CreatePlacedXFn = HRESULT(STDMETHODCALLTYPE*)(void*, D3D12_GPU_VIRTUAL_ADDRESS, const D3D12_RESOURCE_DESC*,
+                                                            D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
+        constexpr int kDevCreatePlacedResourceXSlot = 44;
+        auto* title_memory = static_cast<unsigned char*>(VirtualAlloc(nullptr, 64 * 1024, MEM_COMMIT | MEM_RESERVE,
+                                                                      PAGE_READWRITE));
+        void* placed_x = nullptr;
+        if (title_memory) {
+            std::memset(title_memory, 0xa7, 256);
+            const auto title_va = reinterpret_cast<D3D12_GPU_VIRTUAL_ADDRESS>(title_memory);
+            hr = slot<CreatePlacedXFn>(dev, kDevCreatePlacedResourceXSlot)(dev, title_va, &desc, D3D12_RESOURCE_STATE_COMMON,
+                                                                          nullptr, __uuidof(ID3D12Resource), &placed_x);
+            CHECK(hr == S_OK && placed_x, "CreatePlacedResourceX at slot 44 hr=0x%08lx", static_cast<unsigned long>(hr));
+            if (placed_x) {
+                CHECK(slot<GetGpuVaFn>(placed_x, kResGetGpuVirtualAddress)(placed_x) == title_va,
+                      "a resource placed at a title address reports that address");
+                if (src) slot<RefFn>(src, kRelease)(src);
+                src = placed_x;
+            }
+        }
+
         if (queue && allocator && list && src && dst && fence) {
             // Zero put-buffer pointers make the title's inline fast paths call through the table.
             const auto* put = reinterpret_cast<const uint64_t*>(static_cast<char*>(list) + kPutBufferOffset);
@@ -247,9 +269,11 @@ int main() {
             CHECK(zero, "command-list put-buffer pointers are zero");
             CHECK(slot<GetTypeFn>(list, kListGetType)(list) == D3D12_COMMAND_LIST_TYPE_DIRECT, "list GetType at slot 8");
 
-            void* mapped = nullptr;
-            CHECK(slot<MapFn>(src, kResMap)(src, 0, nullptr, &mapped) == S_OK && mapped, "upload Map");
-            if (mapped) std::memset(mapped, 0xa7, 256);
+            if (!placed_x) {
+                void* mapped = nullptr;
+                CHECK(slot<MapFn>(src, kResMap)(src, 0, nullptr, &mapped) == S_OK && mapped, "upload Map");
+                if (mapped) std::memset(mapped, 0xa7, 256);
+            }
             D3D12_RESOURCE_BARRIER uav{};
             uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             uav.UAV.pResource = static_cast<ID3D12Resource*>(src);   // an Xbox object, unwrapped by the shim
@@ -266,11 +290,12 @@ int main() {
             void* result = nullptr;
             CHECK(slot<MapFn>(dst, kResMap)(dst, 0, nullptr, &result) == S_OK && result, "readback Map");
             CHECK(result && static_cast<unsigned char*>(result)[0] == 0xa7 && static_cast<unsigned char*>(result)[255] == 0xa7,
-                  "the copy recorded through Xbox objects reached the readback buffer");
+                  "the copy recorded through Xbox objects reached the readback buffer (source: the title-address shadow)");
         }
         for (void* object : {fence, dst, src, list, allocator, queue}) {
             if (object) slot<RefFn>(object, kRelease)(object);
         }
+        if (title_memory) VirtualFree(title_memory, 0, MEM_RELEASE);
     }
 
     // Frame pacing: an interval, an origin event, and waits that return new frame tokens.
@@ -302,7 +327,7 @@ int main() {
     const std::string log = read_log();
     if (!log.empty()) {
         CHECK(log.find("device=xbox_function_tables") != std::string::npos, "log records the Xbox layout");
-        CHECK(log.find("XboxDevice[44]::CreatePlacedResourceX") != std::string::npos, "the stub slot is logged");
+        CHECK(log.find("XboxDevice[45]::CreateComponentPlacedResourceX") != std::string::npos, "the stub slot is logged");
     }
     if (g_failed) return 1;
     std::printf("PASS: test_d3d12_xbox_layout\n");

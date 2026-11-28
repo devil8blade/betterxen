@@ -198,6 +198,7 @@ ULONG STDMETHODCALLTYPE bx_xbox_release(void* self) {
     if (refs != 0) return refs;
     erase_locked(object);
     guard.unlock();
+    if (object->iface == &bx_xbox_Resource) bx_xbox_placed_forget(object->host);
     object->host->Release();
     delete object;
     return 0;

@@ -51,7 +51,10 @@ CUSTOM = {
                "CreateCommandListX": "bx_xbox_device_create_command_list_x",
                "SetFrameIntervalX": "bx_xbox_device_set_frame_interval_x",
                "ScheduleFrameEventX": "bx_xbox_device_schedule_frame_event_x",
-               "WaitFrameEventX": "bx_xbox_device_wait_frame_event_x"},
+               "WaitFrameEventX": "bx_xbox_device_wait_frame_event_x",
+               "CreatePlacedResourceX": "bx_xbox_device_create_placed_resource_x",
+               "CreatePlacedResourceX1": "bx_xbox_device_create_placed_resource_x1"},
+    "Resource": {"GetGPUVirtualAddress": "bx_xbox_resource_get_gpu_virtual_address"},
     "GraphicsCommandList": {"ResourceBarrier": "bx_xbox_list_resource_barrier",
                             "CopyTextureRegion": "bx_xbox_list_copy_texture_region"},
 }
