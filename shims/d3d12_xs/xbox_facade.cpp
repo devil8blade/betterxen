@@ -125,7 +125,9 @@ void* bx_xbox_wrap(REFIID riid, void* raw) {
     }
     object->function_table = iface->table;
     object->xbox_ref_count = 1;
-    object->device_out_of_line[0] = kOutOfLineCommon;
+    if (iface == &bx_xbox_Device) {
+        object->xbox_fields[kBxXboxDeviceOutOfLineOffset - offsetof(BxXboxObject, xbox_fields)] = kOutOfLineCommon;
+    }
     object->host = host;
     object->iface = iface;
     object->refs.store(1);
@@ -225,6 +227,67 @@ HRESULT STDMETHODCALLTYPE bx_xbox_device_create_command_queue_x(void* self, cons
     bx_log_emit(BX_LOG_INFO, "d3d12_xs", "CreateCommandQueueX", detail);
     const HRESULT hr = bx_xbox_host<ID3D12Device>(self)->CreateCommandQueue(&pc, riid, ppv);
     return bx_xbox_wrap_result(hr, riid, ppv);
+}
+
+HRESULT STDMETHODCALLTYPE bx_xbox_device_create_command_list_x(void* self, const BxXboxCommandListDesc* desc,
+                                                               ID3D12CommandAllocator* allocator,
+                                                               ID3D12PipelineState* initial_state, REFIID riid,
+                                                               void** ppv) {
+    BX_D3D_TRACE("XboxDevice", "CreateCommandListX");
+    if (!desc || !ppv) return E_INVALIDARG;
+    *ppv = nullptr;
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "type=%d xbox_flags=0x%x node_mask=0x%x barrier_batch=%u (flags and batch not used by the host)",
+                  static_cast<int>(desc->Type), desc->Flags, desc->NodeMask, desc->ResourceBarrierBatchSize);
+    bx_log_emit(BX_LOG_INFO, "d3d12_xs", "CreateCommandListX", detail);
+    const HRESULT hr = bx_xbox_host<ID3D12Device>(self)->CreateCommandList(
+        desc->NodeMask, desc->Type, bx_xbox_unwrap_as(allocator), bx_xbox_unwrap_as(initial_state), riid, ppv);
+    return bx_xbox_wrap_result(hr, riid, ppv);
+}
+
+UINT STDMETHODCALLTYPE bx_xbox_list_resource_barrier(void* self, UINT count, const D3D12_RESOURCE_BARRIER* barriers) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ResourceBarrier");
+    if (!barriers || count == 0) return 0;
+    constexpr UINT kInline = 32;
+    D3D12_RESOURCE_BARRIER inline_copy[kInline];
+    D3D12_RESOURCE_BARRIER* copy = count <= kInline ? inline_copy : new (std::nothrow) D3D12_RESOURCE_BARRIER[count];
+    if (!copy) return 0;
+    for (UINT i = 0; i < count; ++i) {
+        copy[i] = barriers[i];
+        switch (copy[i].Type) {
+        case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION:
+            copy[i].Transition.pResource = bx_xbox_unwrap_as(copy[i].Transition.pResource);
+            break;
+        case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+            copy[i].Aliasing.pResourceBefore = bx_xbox_unwrap_as(copy[i].Aliasing.pResourceBefore);
+            copy[i].Aliasing.pResourceAfter = bx_xbox_unwrap_as(copy[i].Aliasing.pResourceAfter);
+            break;
+        case D3D12_RESOURCE_BARRIER_TYPE_UAV:
+            copy[i].UAV.pResource = bx_xbox_unwrap_as(copy[i].UAV.pResource);
+            break;
+        default:
+            break;
+        }
+    }
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ResourceBarrier(count, copy);
+    if (copy != inline_copy) delete[] copy;
+    return 0;
+}
+
+void STDMETHODCALLTYPE bx_xbox_list_copy_texture_region(void* self, const D3D12_TEXTURE_COPY_LOCATION* dst, UINT x,
+                                                        UINT y, UINT z, const D3D12_TEXTURE_COPY_LOCATION* src,
+                                                        const D3D12_BOX* box) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "CopyTextureRegion");
+    D3D12_TEXTURE_COPY_LOCATION d{}, s{};
+    if (dst) {
+        d = *dst;
+        d.pResource = bx_xbox_unwrap_as(d.pResource);
+    }
+    if (src) {
+        s = *src;
+        s.pResource = bx_xbox_unwrap_as(s.pResource);
+    }
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->CopyTextureRegion(dst ? &d : nullptr, x, y, z, src ? &s : nullptr, box);
 }
 
 } // extern "C"

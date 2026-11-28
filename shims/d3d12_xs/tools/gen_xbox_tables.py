@@ -43,9 +43,18 @@ FAMILIES = {
     "ID3D12QueryHeap": ("ID3D12QueryHeap", "QueryHeap"),
     "ID3D12CommandSignature": ("ID3D12CommandSignature", "CommandSignature"),
     "ID3D12CommandQueue": ("ID3D12CommandQueue", "CommandQueue"),
+    "ID3D12GraphicsCommandList8": ("ID3D12GraphicsCommandList7", "GraphicsCommandList"),
 }
 # Xbox-only slots implemented by hand in xbox_facade.cpp: family -> {method: function}.
-CUSTOM = {"Device": {"CreateCommandQueueX": "bx_xbox_device_create_command_queue_x"}}
+CUSTOM = {
+    "Device": {"CreateCommandQueueX": "bx_xbox_device_create_command_queue_x",
+               "CreateCommandListX": "bx_xbox_device_create_command_list_x",
+               "SetFrameIntervalX": "bx_xbox_device_set_frame_interval_x",
+               "ScheduleFrameEventX": "bx_xbox_device_schedule_frame_event_x",
+               "WaitFrameEventX": "bx_xbox_device_wait_frame_event_x"},
+    "GraphicsCommandList": {"ResourceBarrier": "bx_xbox_list_resource_barrier",
+                            "CopyTextureRegion": "bx_xbox_list_copy_texture_region"},
+}
 SHARED = {"QueryInterface": "bx_xbox_query_interface", "AddRef": "bx_xbox_add_ref",
           "Release": "bx_xbox_release", "GetDevice": "bx_xbox_get_device"}
 # Interfaces whose pointers a forwarded call must unwrap from an Xbox object to its host.
@@ -56,12 +65,25 @@ WRAPPABLE_ARRAY = re.compile(r"^(ID3D12\w+)\s*\*\s*const\s*\*$")
 def strip_sal(text):
     text = re.sub(r"//[^\n]*", "", text)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    prev = None
-    while prev != text:
-        prev = text
-        text = re.sub(r"\b_[A-Za-z]\w*_\s*\([^()]*\)", "", text)
-    text = re.sub(r"\b_[A-Za-z]\w*_\b", "", text)
-    return " ".join(text.split())
+    # SAL annotations, including arguments with nested parentheses such as sizeof(UINT).
+    out, i = [], 0
+    for m in re.finditer(r"\b_[A-Za-z]\w*_\b", text):
+        if m.start() < i:
+            continue
+        out.append(text[i:m.start()])
+        j = m.end()
+        while j < len(text) and text[j] == " ":
+            j += 1
+        if j < len(text) and text[j] == "(":
+            depth = 0
+            while j < len(text):
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+                if depth == 0:
+                    break
+        i = j
+    out.append(text[i:])
+    return " ".join("".join(out).split())
 
 
 def canon(t):
@@ -71,6 +93,7 @@ def canon(t):
     t = re.sub(r"\s*&\s*", "&", t)
     t = t.replace("LPCWSTR", "const WCHAR*").replace("LPCSTR", "const char*")
     t = re.sub(r"\bWINBOOL\b", "BOOL", t)
+    t = re.sub(r"\bFLOAT\b", "float", t)
     t = re.sub(r"^const IID&$", "REFIID", t)
     t = re.sub(r"^const GUID&$", "REFGUID", t)
     if "*" not in t and "&" not in t and "[" not in t:
@@ -94,7 +117,7 @@ def parse_xbox(text):
     bases = {m.group(1): m.group(2) for m in re.finditer(
         r"^D3DINTERFACE\((\w+),[^)]*\)\s*:\s*public\s+(\w+)", text, re.M)}
     tables = {}
-    for m in re.finditer(r"struct\s+(\w+)_Function_Table\s*\{(.*?)\n\};", text, re.S):
+    for m in re.finditer(r"struct\s+(\w+)_Function_Table\s*\{((?:(?!struct\s+\w+_Function_Table\b).)*?)\n\s*\};", text, re.S):
         entries = []
         for decl in re.split(r";\s*\n", m.group(2) + "\n"):
             decl = strip_sal(decl).rstrip(";").strip()
@@ -230,7 +253,7 @@ def chain(bases, leaf):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    xtext = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+    xtext = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")  # parts of the header use CRLF
     pc_header = sys.argv[2] if len(sys.argv) > 2 else gen_proxy.find_header()
     interfaces = gen_proxy.parse_interfaces(Path(pc_header).read_text(encoding="utf-8", errors="replace"))
     iids, bases, tables = parse_xbox(xtext)

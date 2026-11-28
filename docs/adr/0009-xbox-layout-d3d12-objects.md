@@ -29,7 +29,7 @@ From the same header:
    - **Stubs:** every other slot is a `BX_VTABLE_STUB_LOG` stub.
    - **Hand-written slots:** Xbox-only methods are implemented in `xbox_facade.cpp` as titles need them.
 3. **Who gets which layout:** titles set `Version` in the `D3D12XBOX_CREATE_DEVICE_PARAMETERS` block they pass to `D3D12XboxCreateDevice`, and the documentation requires it. Those calls get the Xbox layout. BetterXen's synthetic fixtures are PC-layout clients built against `<d3d12.h>`, pass a zeroed block, and keep the PC proxy. The log records which layout was chosen (`xbox_layout`).
-4. **Command lists (Phase 2):** command lists get an Xbox object whose put-buffer limits always fail the inline tests, so every call reaches the table.
+4. **Command lists (Phase 2):** command lists get an Xbox object whose zeroed put-buffer pointers fail every inline room check, so every call reaches the table.
 
 ## Consequences
 
@@ -38,6 +38,12 @@ From the same header:
   - So are the objects it creates: resources, heaps, fences, descriptor heaps, root signatures, pipeline states, command allocators, query heaps, command signatures and command queues.
   - `CreateCommandQueueX` maps the Xbox queue description onto PC `CreateCommandQueue`. The engine and queue indices are logged and not used.
   - On the target build, the title now creates its device and four compute queues, and stops at `CreateCommandListX`, which is Phase 2.
+- **Phase 2:**
+  - **Command lists:** `ID3D12GraphicsCommandList8`, 150 slots: 75 forwarded, 6 shared or hand-written, 69 stubs. They are created through `CreateCommandListX` and the PC `CreateCommandList`, and their Xbox field area is zeroed, so the five inline fast paths call through the table.
+  - **Interface pointers inside structures:** `ResourceBarrier` and `CopyTextureRegion` unwrap them before the host call. The Xbox `ResourceBarrier` returns 0 actions.
+  - **Frame pacing:** `SetFrameIntervalX`, `ScheduleFrameEventX` and `WaitFrameEventX` (`frame_pacing.cpp`) are emulated from the recorded interval by a host timer. It signals the origin, vblank and flip events and their ancillary handles, and gives out frame-pipeline tokens as documented.
+  - **Generator fixes:** CRLF lines in parts of the header, a table definition whose end the boundary pattern ran past (it hid `ID3D12GraphicsCommandList1`), SAL annotations with nested parentheses, and `FLOAT`/`float`.
+  - **On the target build:** the title creates 581 command lists, sets a 30 Hz interval and schedules its origin and flip events. It then lays out its own descriptor memory with `xmem` placeholders (#643) and stops at `CreatePlacedResourceX1`, which creates a resource at a GPU virtual address the title chose. D3DMetal cannot create a resource over existing memory (the existing-memory imports measured for #473 return `E_NOTIMPL`), so this needs the M3 decision on fixed-address resources. It is not a slot to fill in.
 - **Fixtures:** the existing fixtures are unaffected, since they use the PC layout. `tests/conformance/test_d3d12_xbox_layout` calls Xbox slots by number, with the expected results taken from a PC-layout device. It fails against the previous `d3d12_xs.dll`.
 - **Descriptor heaps:** a title compiled with `D3DCOMPILE_NO_DEBUG` writes console-format descriptors straight into descriptor-heap memory and computes handles with Xbox descriptor sizes. Supporting that needs BetterXen-owned descriptor heaps translated at bind time, which is not part of this ADR.
 - **Identity:** QueryInterface on an Xbox object for another wrapped family returns that family's Xbox object over the same host. A host reached through another path, such as `GetDevice` returning the raw host device, may get a second Xbox object.

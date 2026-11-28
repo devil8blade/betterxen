@@ -16,6 +16,7 @@ extern const BxXboxIface bx_xbox_CommandAllocator;
 extern const BxXboxIface bx_xbox_QueryHeap;
 extern const BxXboxIface bx_xbox_CommandSignature;
 extern const BxXboxIface bx_xbox_CommandQueue;
+extern const BxXboxIface bx_xbox_GraphicsCommandList;
 
 extern const BxXboxIface* const bx_xbox_ifaces[];
 extern const size_t bx_xbox_iface_count;

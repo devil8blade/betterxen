@@ -250,8 +250,6 @@ static UINT64 STDMETHODCALLTYPE x_Device_71(void*) { BX_VTABLE_STUB_LOG("XboxDev
 /* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_72(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 72u, "SetGpuMemoryPriorityX"); return E_NOTIMPL; }
 /* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_73(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 73u, "CreateCommandListX"); return E_NOTIMPL; }
-/* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_74(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 74u, "RegisterPagePoolX"); return E_NOTIMPL; }
 /* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_75(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 75u, "UnregisterPagePoolX"); return E_NOTIMPL; }
@@ -259,12 +257,6 @@ static HRESULT STDMETHODCALLTYPE x_Device_75(void*) { BX_VTABLE_STUB_LOG("XboxDe
 static HRESULT STDMETHODCALLTYPE x_Device_76(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 76u, "CreateCommittedResourceX"); return E_NOTIMPL; }
 /* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_77(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 77u, "CreateComponentPlacedResourceX1"); return E_NOTIMPL; }
-/* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_78(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 78u, "SetFrameIntervalX"); return E_NOTIMPL; }
-/* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_79(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 79u, "ScheduleFrameEventX"); return E_NOTIMPL; }
-/* Xbox-only method */
-static HRESULT STDMETHODCALLTYPE x_Device_80(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 80u, "WaitFrameEventX"); return E_NOTIMPL; }
 /* Xbox-only method */
 static HRESULT STDMETHODCALLTYPE x_Device_81(void*) { BX_VTABLE_STUB_LOG("XboxDevice", 81u, "GetFrameStatisticsX"); return E_NOTIMPL; }
 /* Xbox-only method */
@@ -555,14 +547,14 @@ const void* const kDeviceTable[] = {
     reinterpret_cast<const void*>(&x_Device_70),
     reinterpret_cast<const void*>(&x_Device_71),
     reinterpret_cast<const void*>(&x_Device_72),
-    reinterpret_cast<const void*>(&x_Device_73),
+    reinterpret_cast<const void*>(&bx_xbox_device_create_command_list_x),
     reinterpret_cast<const void*>(&x_Device_74),
     reinterpret_cast<const void*>(&x_Device_75),
     reinterpret_cast<const void*>(&x_Device_76),
     reinterpret_cast<const void*>(&x_Device_77),
-    reinterpret_cast<const void*>(&x_Device_78),
-    reinterpret_cast<const void*>(&x_Device_79),
-    reinterpret_cast<const void*>(&x_Device_80),
+    reinterpret_cast<const void*>(&bx_xbox_device_set_frame_interval_x),
+    reinterpret_cast<const void*>(&bx_xbox_device_schedule_frame_event_x),
+    reinterpret_cast<const void*>(&bx_xbox_device_wait_frame_event_x),
     reinterpret_cast<const void*>(&x_Device_81),
     reinterpret_cast<const void*>(&x_Device_82),
     reinterpret_cast<const void*>(&x_Device_83),
@@ -639,7 +631,7 @@ const IID kDeviceIids[] = {
     {0xc4fec28f, 0x7966, 0x4e95, {0x9f, 0x94, 0xf4, 0x31, 0xcb, 0x56, 0xc3, 0xb8}}, /* ID3D12Object */
 };
 
-/* ID3D12Device11: 139 slots (75 forwarded, 4 shared, 60 stubs); hosted on ID3D12Device10. */
+/* ID3D12Device11: 139 slots (75 forwarded, 8 shared, 56 stubs); hosted on ID3D12Device10. */
 const IID kHostDevice = __uuidof(ID3D12Device10);
 
 static HRESULT STDMETHODCALLTYPE x_Resource_3(void* self, REFGUID a0, UINT * a1, void * a2) {
@@ -1284,6 +1276,622 @@ const IID kCommandQueueIids[] = {
 /* ID3D12CommandQueue: 38 slots (15 forwarded, 4 shared, 19 stubs); hosted on ID3D12CommandQueue. */
 const IID kHostCommandQueue = __uuidof(ID3D12CommandQueue);
 
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_3(void* self, REFGUID a0, UINT * a1, void * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "GetPrivateData");
+    return bx_xbox_host<ID3D12Object>(self)->GetPrivateData(a0, a1, a2);
+}
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_4(void* self, REFGUID a0, UINT a1, const void * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetPrivateData");
+    return bx_xbox_host<ID3D12Object>(self)->SetPrivateData(a0, a1, a2);
+}
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_5(void* self, REFGUID a0, const IUnknown * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetPrivateDataInterface");
+    return bx_xbox_host<ID3D12Object>(self)->SetPrivateDataInterface(a0, bx_xbox_unwrap_as<IUnknown>(a1));
+}
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_6(void* self, const WCHAR * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetName");
+    return bx_xbox_host<ID3D12Object>(self)->SetName(a0);
+}
+static D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE x_GraphicsCommandList_8(void* self) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "GetType");
+    return bx_xbox_host<ID3D12CommandList>(self)->GetType();
+}
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_9(void* self) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "Close");
+    return bx_xbox_host<ID3D12GraphicsCommandList>(self)->Close();
+}
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_10(void* self, ID3D12CommandAllocator * a0, ID3D12PipelineState * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "Reset");
+    return bx_xbox_host<ID3D12GraphicsCommandList>(self)->Reset(bx_xbox_unwrap_as<ID3D12CommandAllocator>(a0), bx_xbox_unwrap_as<ID3D12PipelineState>(a1));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_11(void* self, ID3D12PipelineState * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ClearState");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ClearState(bx_xbox_unwrap_as<ID3D12PipelineState>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_12(void* self, UINT a0, UINT a1, UINT a2, UINT a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "DrawInstanced");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->DrawInstanced(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_13(void* self, UINT a0, UINT a1, UINT a2, INT a3, UINT a4) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "DrawIndexedInstanced");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->DrawIndexedInstanced(a0, a1, a2, a3, a4);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_14(void* self, UINT a0, UINT a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "Dispatch");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->Dispatch(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_15(void* self, ID3D12Resource * a0, UINT64 a1, ID3D12Resource * a2, UINT64 a3, UINT64 a4) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "CopyBufferRegion");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->CopyBufferRegion(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_17(void* self, ID3D12Resource * a0, ID3D12Resource * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "CopyResource");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->CopyResource(bx_xbox_unwrap_as<ID3D12Resource>(a0), bx_xbox_unwrap_as<ID3D12Resource>(a1));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_18(void* self, ID3D12Resource * a0, const D3D12_TILED_RESOURCE_COORDINATE * a1, const D3D12_TILE_REGION_SIZE * a2, ID3D12Resource * a3, UINT64 a4, D3D12_TILE_COPY_FLAGS a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "CopyTiles");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->CopyTiles(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, a2, bx_xbox_unwrap_as<ID3D12Resource>(a3), a4, a5);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_19(void* self, ID3D12Resource * a0, UINT a1, ID3D12Resource * a2, UINT a3, DXGI_FORMAT a4) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ResolveSubresource");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ResolveSubresource(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_20(void* self, D3D12_PRIMITIVE_TOPOLOGY a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "IASetPrimitiveTopology");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->IASetPrimitiveTopology(a0);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_21(void* self, UINT a0, const D3D12_VIEWPORT * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "RSSetViewports");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->RSSetViewports(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_22(void* self, UINT a0, const D3D12_RECT * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "RSSetScissorRects");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->RSSetScissorRects(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_23(void* self, const FLOAT a0[4]) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "OMSetBlendFactor");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->OMSetBlendFactor(a0);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_24(void* self, UINT a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "OMSetStencilRef");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->OMSetStencilRef(a0);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_25(void* self, ID3D12PipelineState * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetPipelineState");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetPipelineState(bx_xbox_unwrap_as<ID3D12PipelineState>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_27(void* self, ID3D12GraphicsCommandList * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ExecuteBundle");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ExecuteBundle(bx_xbox_unwrap_as<ID3D12GraphicsCommandList>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_28(void* self, ID3D12QueryHeap * a0, D3D12_QUERY_TYPE a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "BeginQuery");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->BeginQuery(bx_xbox_unwrap_as<ID3D12QueryHeap>(a0), a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_29(void* self, ID3D12QueryHeap * a0, D3D12_QUERY_TYPE a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "EndQuery");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->EndQuery(bx_xbox_unwrap_as<ID3D12QueryHeap>(a0), a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_30(void* self, ID3D12QueryHeap * a0, D3D12_QUERY_TYPE a1, UINT a2, UINT a3, ID3D12Resource * a4, UINT64 a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ResolveQueryData");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ResolveQueryData(bx_xbox_unwrap_as<ID3D12QueryHeap>(a0), a1, a2, a3, bx_xbox_unwrap_as<ID3D12Resource>(a4), a5);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_31(void* self, ID3D12Resource * a0, UINT64 a1, D3D12_PREDICATION_OP a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetPredication");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetPredication(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_32(void* self, UINT a0, ID3D12DescriptorHeap *const * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetDescriptorHeaps");
+    BxXboxUnwrapArray<ID3D12DescriptorHeap> u1(a1, a0);
+    if (!u1.ok()) return ;
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetDescriptorHeaps(a0, u1.data());
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_33(void* self, ID3D12RootSignature * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRootSignature");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRootSignature(bx_xbox_unwrap_as<ID3D12RootSignature>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_34(void* self, ID3D12RootSignature * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRootSignature");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRootSignature(bx_xbox_unwrap_as<ID3D12RootSignature>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_35(void* self, UINT a0, D3D12_GPU_DESCRIPTOR_HANDLE a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRootDescriptorTable");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRootDescriptorTable(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_36(void* self, UINT a0, D3D12_GPU_DESCRIPTOR_HANDLE a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRootDescriptorTable");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRootDescriptorTable(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_37(void* self, UINT a0, UINT a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRoot32BitConstant");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRoot32BitConstant(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_38(void* self, UINT a0, UINT a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRoot32BitConstant");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRoot32BitConstant(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_39(void* self, UINT a0, UINT a1, const void * a2, UINT a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRoot32BitConstants");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRoot32BitConstants(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_40(void* self, UINT a0, UINT a1, const void * a2, UINT a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRoot32BitConstants");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRoot32BitConstants(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_41(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRootConstantBufferView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRootConstantBufferView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_42(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRootConstantBufferView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRootConstantBufferView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_43(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRootShaderResourceView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRootShaderResourceView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_44(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRootShaderResourceView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRootShaderResourceView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_45(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetComputeRootUnorderedAccessView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetComputeRootUnorderedAccessView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_46(void* self, UINT a0, D3D12_GPU_VIRTUAL_ADDRESS a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetGraphicsRootUnorderedAccessView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetGraphicsRootUnorderedAccessView(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_47(void* self, const D3D12_INDEX_BUFFER_VIEW * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "IASetIndexBuffer");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->IASetIndexBuffer(a0);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_48(void* self, UINT a0, UINT a1, const D3D12_VERTEX_BUFFER_VIEW * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "IASetVertexBuffers");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->IASetVertexBuffers(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_49(void* self, UINT a0, UINT a1, const D3D12_STREAM_OUTPUT_BUFFER_VIEW * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SOSetTargets");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SOSetTargets(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_50(void* self, UINT a0, const D3D12_CPU_DESCRIPTOR_HANDLE * a1, WINBOOL a2, const D3D12_CPU_DESCRIPTOR_HANDLE * a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "OMSetRenderTargets");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->OMSetRenderTargets(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_51(void* self, D3D12_CPU_DESCRIPTOR_HANDLE a0, D3D12_CLEAR_FLAGS a1, FLOAT a2, UINT8 a3, UINT a4, const D3D12_RECT * a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ClearDepthStencilView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ClearDepthStencilView(a0, a1, a2, a3, a4, a5);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_52(void* self, D3D12_CPU_DESCRIPTOR_HANDLE a0, const FLOAT a1[4], UINT a2, const D3D12_RECT * a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ClearRenderTargetView");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ClearRenderTargetView(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_53(void* self, D3D12_GPU_DESCRIPTOR_HANDLE a0, D3D12_CPU_DESCRIPTOR_HANDLE a1, ID3D12Resource * a2, const UINT a3[4], UINT a4, const D3D12_RECT * a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ClearUnorderedAccessViewUint");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ClearUnorderedAccessViewUint(a0, a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4, a5);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_54(void* self, D3D12_GPU_DESCRIPTOR_HANDLE a0, D3D12_CPU_DESCRIPTOR_HANDLE a1, ID3D12Resource * a2, const float a3[4], UINT a4, const D3D12_RECT * a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ClearUnorderedAccessViewFloat");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ClearUnorderedAccessViewFloat(a0, a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4, a5);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_55(void* self, ID3D12Resource * a0, const D3D12_DISCARD_REGION * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "DiscardResource");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->DiscardResource(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_56(void* self, UINT a0, const void * a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetMarker");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->SetMarker(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_57(void* self, UINT a0, const void * a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "BeginEvent");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->BeginEvent(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_58(void* self) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "EndEvent");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->EndEvent();
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_59(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 59u, "InsertGpuMarker"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_60(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 60u, "InsertTimingMarker"); return 0; }
+static void STDMETHODCALLTYPE x_GraphicsCommandList_61(void* self, ID3D12CommandSignature * a0, UINT a1, ID3D12Resource * a2, UINT64 a3, ID3D12Resource * a4, UINT64 a5) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ExecuteIndirect");
+    bx_xbox_host<ID3D12GraphicsCommandList>(self)->ExecuteIndirect(bx_xbox_unwrap_as<ID3D12CommandSignature>(a0), a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, bx_xbox_unwrap_as<ID3D12Resource>(a4), a5);
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_62(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 62u, "CopyMemoryToMemoryX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_63(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 63u, "FillMemoryWith32BitValueX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_64(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 64u, "FillMemoryWith64BitValueX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_65(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 65u, "FillMemoryWith128BitValueX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_66(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 66u, "SetOcclusionQueryControlX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_67(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 67u, "SetPerfectOcclusionQueriesX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_68(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 68u, "SetHiStencilControlX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_69(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 69u, "FlushPipelineX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_70(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 70u, "OMSetDepthBoundsX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_71(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 71u, "Write32BitValueBottomOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_72(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 72u, "Write64BitValueBottomOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_73(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 73u, "Wait32BitValueX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_74(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 74u, "Wait64BitValueX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_75(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 75u, "SetPixelShaderDepthForceZOrderX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_76(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 76u, "ExecuteIndirectBundleX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_77(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 77u, "SetupOrderedAppendCounterX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_78(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 78u, "WriteGDSX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_79(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 79u, "ReadGDSX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_80(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 80u, "DispatchX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_81(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 81u, "SetHiStencilStateX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_82(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 82u, "RSSetMSAAParametersX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_83(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 83u, "DrawIndexedX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_84(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 84u, "NopX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_85(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 85u, "CopyTextureRegionX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_86(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 86u, "CopyResourceX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_87(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 87u, "Deprecated_SetPredicationBufferX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_88(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 88u, "Deprecated_AdvancePredicationX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_89(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 89u, "ExecuteCommandListsX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_90(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 90u, "Write32BitValueTopOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_91(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 91u, "Write64BitValueTopOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_92(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 92u, "Write32BitValueBottomOfShaderX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_93(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 93u, "GetExecutionCommandSizeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_94(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 94u, "CloseBundleX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_95(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 95u, "KickoffX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_96(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 96u, "RSSetDepthBiasX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_97(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 97u, "SetGraphicsShaderLimitsX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_98(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 98u, "SetComputeShaderLimitsX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_99(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 99u, "SetResourceCompressionStateX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_100(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 100u, "DispatchMeshX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_101(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 101u, "DriverHintX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_102(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 102u, "StartCountersX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_103(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 103u, "SampleCountersX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_104(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 104u, "StopCountersX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_105(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 105u, "SetDeferredPrimitiveBatchBinningX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_106(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 106u, "DeferredPrimitiveBreakBatchX"); return 0; }
+static void STDMETHODCALLTYPE x_GraphicsCommandList_107(void* self, ID3D12Resource * a0, UINT64 a1, ID3D12Resource * a2, UINT64 a3, UINT a4, ID3D12Resource *const * a5, const D3D12_SUBRESOURCE_RANGE_UINT64 * a6) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "AtomicCopyBufferUINT");
+    BxXboxUnwrapArray<ID3D12Resource> u5(a5, a4);
+    if (!u5.ok()) return ;
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->AtomicCopyBufferUINT(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4, u5.data(), a6);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_108(void* self, ID3D12Resource * a0, UINT64 a1, ID3D12Resource * a2, UINT64 a3, UINT a4, ID3D12Resource *const * a5, const D3D12_SUBRESOURCE_RANGE_UINT64 * a6) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "AtomicCopyBufferUINT64");
+    BxXboxUnwrapArray<ID3D12Resource> u5(a5, a4);
+    if (!u5.ok()) return ;
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->AtomicCopyBufferUINT64(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, bx_xbox_unwrap_as<ID3D12Resource>(a2), a3, a4, u5.data(), a6);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_109(void* self, FLOAT a0, FLOAT a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "OMSetDepthBounds");
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->OMSetDepthBounds(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_110(void* self, UINT a0, UINT a1, D3D12_SAMPLE_POSITION * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetSamplePositions");
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->SetSamplePositions(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_111(void* self, ID3D12Resource * a0, UINT a1, UINT a2, UINT a3, ID3D12Resource * a4, UINT a5, D3D12_RECT * a6, DXGI_FORMAT a7, D3D12_RESOLVE_MODE a8) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ResolveSubresourceRegion");
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->ResolveSubresourceRegion(bx_xbox_unwrap_as<ID3D12Resource>(a0), a1, a2, a3, bx_xbox_unwrap_as<ID3D12Resource>(a4), a5, a6, a7, a8);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_112(void* self, UINT a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetViewInstanceMask");
+    bx_xbox_host<ID3D12GraphicsCommandList1>(self)->SetViewInstanceMask(a0);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_113(void* self, UINT a0, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER * a1, const D3D12_WRITEBUFFERIMMEDIATE_MODE * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "WriteBufferImmediate");
+    bx_xbox_host<ID3D12GraphicsCommandList2>(self)->WriteBufferImmediate(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_114(void* self, ID3D12ProtectedResourceSession * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetProtectedResourceSession");
+    bx_xbox_host<ID3D12GraphicsCommandList3>(self)->SetProtectedResourceSession(bx_xbox_unwrap_as<ID3D12ProtectedResourceSession>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_115(void* self, UINT a0, const D3D12_RENDER_PASS_RENDER_TARGET_DESC * a1, const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC * a2, D3D12_RENDER_PASS_FLAGS a3) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "BeginRenderPass");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->BeginRenderPass(a0, a1, a2, a3);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_116(void* self) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "EndRenderPass");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->EndRenderPass();
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_117(void* self, ID3D12MetaCommand * a0, const void * a1, SIZE_T a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "InitializeMetaCommand");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->InitializeMetaCommand(bx_xbox_unwrap_as<ID3D12MetaCommand>(a0), a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_118(void* self, ID3D12MetaCommand * a0, const void * a1, SIZE_T a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "ExecuteMetaCommand");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->ExecuteMetaCommand(bx_xbox_unwrap_as<ID3D12MetaCommand>(a0), a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_119(void* self, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC * a0, UINT a1, const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "BuildRaytracingAccelerationStructure");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->BuildRaytracingAccelerationStructure(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_120(void* self, const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC * a0, UINT a1, const D3D12_GPU_VIRTUAL_ADDRESS * a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "EmitRaytracingAccelerationStructurePostbuildInfo");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->EmitRaytracingAccelerationStructurePostbuildInfo(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_121(void* self, D3D12_GPU_VIRTUAL_ADDRESS a0, D3D12_GPU_VIRTUAL_ADDRESS a1, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "CopyRaytracingAccelerationStructure");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->CopyRaytracingAccelerationStructure(a0, a1, a2);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_122(void* self, ID3D12StateObject * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "SetPipelineState1");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->SetPipelineState1(bx_xbox_unwrap_as<ID3D12StateObject>(a0));
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_123(void* self, const D3D12_DISPATCH_RAYS_DESC * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "DispatchRays");
+    bx_xbox_host<ID3D12GraphicsCommandList4>(self)->DispatchRays(a0);
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_124(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 124u, "CpuValidateResultX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_125(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 125u, "BuildRaytracingAccelerationStructureFromCanonicalBVH"); return 0; }
+static void STDMETHODCALLTYPE x_GraphicsCommandList_126(void* self, D3D12_SHADING_RATE a0, const D3D12_SHADING_RATE_COMBINER * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "RSSetShadingRate");
+    bx_xbox_host<ID3D12GraphicsCommandList5>(self)->RSSetShadingRate(a0, a1);
+}
+static void STDMETHODCALLTYPE x_GraphicsCommandList_127(void* self, ID3D12Resource * a0) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "RSSetShadingRateImage");
+    bx_xbox_host<ID3D12GraphicsCommandList5>(self)->RSSetShadingRateImage(bx_xbox_unwrap_as<ID3D12Resource>(a0));
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_128(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 128u, "RSSetShadingRateX"); return 0; }
+static void STDMETHODCALLTYPE x_GraphicsCommandList_129(void* self, UINT a0, UINT a1, UINT a2) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "DispatchMesh");
+    bx_xbox_host<ID3D12GraphicsCommandList6>(self)->DispatchMesh(a0, a1, a2);
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_130(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 130u, "BuildRaytracingAccelerationStructureBatchedX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_131(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 131u, "SyncTopOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_132(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 132u, "SyncBottomOfPipeX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_133(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 133u, "BuildRaytracingAccelerationStructureBatched2X"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_134(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 134u, "DispatchRaysX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_135(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 135u, "PrefetchMemoryX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_136(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 136u, "PrefetchPipelineStateX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_137(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 137u, "Write32BitValueBottomOfPipe2X"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_138(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 138u, "Write64BitValueBottomOfPipe2X"); return 0; }
+/* Xbox-only method */
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_139(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 139u, "ResetX"); return E_NOTIMPL; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_140(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 140u, "ResourceBarrierX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_141(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 141u, "SetShaderScratchSpaceX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_142(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 142u, "OMSetSampleMaskX"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_143(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 143u, "WritePRTLODStatisticsX"); return 0; }
+/* Xbox-only method */
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_144(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 144u, "EnableLiveDebuggingX"); return E_NOTIMPL; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_145(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 145u, "SetComputeShaderLaunchParametersX"); return 0; }
+static void STDMETHODCALLTYPE x_GraphicsCommandList_146(void* self, UINT32 a0, const D3D12_BARRIER_GROUP * a1) {
+    BX_D3D_TRACE("XboxGraphicsCommandList", "Barrier");
+    bx_xbox_host<ID3D12GraphicsCommandList7>(self)->Barrier(a0, a1);
+}
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_147(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 147u, "OMSetFrontAndBackStencilRef"); return 0; }
+/* Xbox-only method */
+static UINT64 STDMETHODCALLTYPE x_GraphicsCommandList_148(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 148u, "AllocateFromCommandAllocatorX"); return 0; }
+/* Xbox-only method */
+static HRESULT STDMETHODCALLTYPE x_GraphicsCommandList_149(void*) { BX_VTABLE_STUB_LOG("XboxGraphicsCommandList", 149u, "RehydrateRaytracingAccelerationStructureBatchedX"); return E_NOTIMPL; }
+
+const void* const kGraphicsCommandListTable[] = {
+    reinterpret_cast<const void*>(&bx_xbox_query_interface),
+    reinterpret_cast<const void*>(&bx_xbox_add_ref),
+    reinterpret_cast<const void*>(&bx_xbox_release),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_3),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_4),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_5),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_6),
+    reinterpret_cast<const void*>(&bx_xbox_get_device),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_8),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_9),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_10),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_11),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_12),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_13),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_14),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_15),
+    reinterpret_cast<const void*>(&bx_xbox_list_copy_texture_region),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_17),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_18),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_19),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_20),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_21),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_22),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_23),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_24),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_25),
+    reinterpret_cast<const void*>(&bx_xbox_list_resource_barrier),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_27),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_28),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_29),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_30),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_31),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_32),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_33),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_34),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_35),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_36),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_37),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_38),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_39),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_40),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_41),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_42),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_43),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_44),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_45),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_46),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_47),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_48),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_49),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_50),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_51),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_52),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_53),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_54),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_55),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_56),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_57),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_58),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_59),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_60),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_61),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_62),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_63),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_64),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_65),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_66),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_67),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_68),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_69),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_70),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_71),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_72),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_73),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_74),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_75),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_76),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_77),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_78),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_79),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_80),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_81),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_82),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_83),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_84),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_85),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_86),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_87),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_88),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_89),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_90),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_91),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_92),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_93),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_94),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_95),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_96),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_97),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_98),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_99),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_100),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_101),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_102),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_103),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_104),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_105),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_106),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_107),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_108),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_109),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_110),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_111),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_112),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_113),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_114),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_115),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_116),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_117),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_118),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_119),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_120),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_121),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_122),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_123),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_124),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_125),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_126),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_127),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_128),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_129),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_130),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_131),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_132),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_133),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_134),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_135),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_136),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_137),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_138),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_139),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_140),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_141),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_142),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_143),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_144),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_145),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_146),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_147),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_148),
+    reinterpret_cast<const void*>(&x_GraphicsCommandList_149),
+};
+
+const IID kGraphicsCommandListIids[] = {
+    {0xee936ef9, 0x599d, 0x4d28, {0x93, 0x8e, 0x23, 0xc4, 0xad, 0x05, 0xce, 0x51}}, /* ID3D12GraphicsCommandList8 */
+    {0xdd171223, 0x8b61, 0x4769, {0x90, 0xe3, 0x16, 0x0c, 0xcd, 0xe4, 0xe2, 0xc1}}, /* ID3D12GraphicsCommandList7 */
+    {0xc3827890, 0x4024, 0x474c, {0x98, 0xcf, 0x64, 0x5b, 0x51, 0xdc, 0x48, 0x74}}, /* ID3D12GraphicsCommandList6 */
+    {0x55050859, 0x4024, 0x474c, {0x98, 0xcf, 0x64, 0x5b, 0x51, 0xdc, 0x48, 0x74}}, /* ID3D12GraphicsCommandList5 */
+    {0x8754318e, 0xd3a9, 0x4541, {0x98, 0xcf, 0x64, 0x5b, 0x50, 0xdc, 0x48, 0x74}}, /* ID3D12GraphicsCommandList4 */
+    {0x6fda83a7, 0xb84c, 0x4e38, {0x9a, 0xc8, 0xc7, 0xbd, 0x22, 0x01, 0x6b, 0x3d}}, /* ID3D12GraphicsCommandList3 */
+    {0x38c3e585, 0xff17, 0x412c, {0x91, 0x50, 0x4f, 0xc6, 0xf9, 0xd7, 0x2a, 0x28}}, /* ID3D12GraphicsCommandList2 */
+    {0x553103fb, 0x1fe7, 0x4557, {0xbb, 0x38, 0x94, 0x6d, 0x7d, 0x0e, 0x7c, 0xa7}}, /* ID3D12GraphicsCommandList1 */
+    {0x5b160d0f, 0xac1b, 0x4185, {0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55}}, /* ID3D12GraphicsCommandList */
+    {0x7116d91c, 0xe7e4, 0x47ce, {0xb8, 0xc6, 0xec, 0x81, 0x68, 0xf4, 0x37, 0xe5}}, /* ID3D12CommandList */
+    {0x905db94b, 0xa00c, 0x4140, {0x9d, 0xf5, 0x2b, 0x64, 0xca, 0x9e, 0xa3, 0x57}}, /* ID3D12DeviceChild */
+    {0xc4fec28f, 0x7966, 0x4e95, {0x9f, 0x94, 0xf4, 0x31, 0xcb, 0x56, 0xc3, 0xb8}}, /* ID3D12Object */
+};
+
+/* ID3D12GraphicsCommandList8: 150 slots (75 forwarded, 6 shared, 69 stubs); hosted on ID3D12GraphicsCommandList7. */
+const IID kHostGraphicsCommandList = __uuidof(ID3D12GraphicsCommandList7);
+
 } // namespace
 
 extern const BxXboxIface bx_xbox_Device = {"ID3D12Device11", kDeviceIids, sizeof(kDeviceIids) / sizeof(IID), &kHostDevice, kDeviceTable, 139};
@@ -1297,6 +1905,7 @@ extern const BxXboxIface bx_xbox_CommandAllocator = {"ID3D12CommandAllocator", k
 extern const BxXboxIface bx_xbox_QueryHeap = {"ID3D12QueryHeap", kQueryHeapIids, sizeof(kQueryHeapIids) / sizeof(IID), &kHostQueryHeap, kQueryHeapTable, 8};
 extern const BxXboxIface bx_xbox_CommandSignature = {"ID3D12CommandSignature", kCommandSignatureIids, sizeof(kCommandSignatureIids) / sizeof(IID), &kHostCommandSignature, kCommandSignatureTable, 8};
 extern const BxXboxIface bx_xbox_CommandQueue = {"ID3D12CommandQueue", kCommandQueueIids, sizeof(kCommandQueueIids) / sizeof(IID), &kHostCommandQueue, kCommandQueueTable, 38};
+extern const BxXboxIface bx_xbox_GraphicsCommandList = {"ID3D12GraphicsCommandList8", kGraphicsCommandListIids, sizeof(kGraphicsCommandListIids) / sizeof(IID), &kHostGraphicsCommandList, kGraphicsCommandListTable, 150};
 
 extern const BxXboxIface* const bx_xbox_ifaces[] = {
     &bx_xbox_Device,
@@ -1310,5 +1919,6 @@ extern const BxXboxIface* const bx_xbox_ifaces[] = {
     &bx_xbox_QueryHeap,
     &bx_xbox_CommandSignature,
     &bx_xbox_CommandQueue,
+    &bx_xbox_GraphicsCommandList,
 };
-extern const size_t bx_xbox_iface_count = 11;
+extern const size_t bx_xbox_iface_count = 12;

@@ -184,6 +184,118 @@ int main() {
         slot<RefFn>(heap, kRelease)(heap);
     }
 
+    // Command recording through Xbox objects: queue, allocator and list from the Xbox methods, a
+    // copy between two Xbox buffers with a barrier, execution and a fence wait.
+    {
+        struct QueueDescX { D3D12_COMMAND_LIST_TYPE Type; UINT Flags, EngineOrPipeIndex, QueueIndex; };
+        struct ListDescX { D3D12_COMMAND_LIST_TYPE Type; UINT Flags, NodeMask, ResourceBarrierBatchSize; };
+        using CreateQueueXFn = HRESULT(STDMETHODCALLTYPE*)(void*, const QueueDescX*, REFIID, void**);
+        using CreateAllocatorFn = HRESULT(STDMETHODCALLTYPE*)(void*, D3D12_COMMAND_LIST_TYPE, REFIID, void**);
+        using CreateListXFn = HRESULT(STDMETHODCALLTYPE*)(void*, const ListDescX*, void*, void*, REFIID, void**);
+        using CreateCommittedFn = HRESULT(STDMETHODCALLTYPE*)(void*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS,
+                                                              const D3D12_RESOURCE_DESC*, D3D12_RESOURCE_STATES,
+                                                              const D3D12_CLEAR_VALUE*, REFIID, void**);
+        using CreateFenceFn = HRESULT(STDMETHODCALLTYPE*)(void*, UINT64, D3D12_FENCE_FLAGS, REFIID, void**);
+        using GetTypeFn = D3D12_COMMAND_LIST_TYPE(STDMETHODCALLTYPE*)(void*);
+        using CopyBufferFn = void(STDMETHODCALLTYPE*)(void*, void*, UINT64, void*, UINT64, UINT64);
+        using BarrierFn = UINT(STDMETHODCALLTYPE*)(void*, UINT, const D3D12_RESOURCE_BARRIER*);
+        using CloseFn = HRESULT(STDMETHODCALLTYPE*)(void*);
+        using ExecuteFn = void(STDMETHODCALLTYPE*)(void*, UINT, void* const*);
+        using QueueSignalFn = HRESULT(STDMETHODCALLTYPE*)(void*, void*, UINT64);
+        using FenceEventFn = HRESULT(STDMETHODCALLTYPE*)(void*, UINT64, HANDLE);
+        constexpr int kDevCreateCommandAllocator = 9, kDevCreateCommittedResource = 27, kDevCreateFence = 36;
+        constexpr int kDevCreateCommandQueueX = 48, kDevCreateCommandListX = 73;
+        constexpr int kListGetType = 8, kListClose = 9, kListCopyBufferRegion = 15, kListResourceBarrier = 26;
+        constexpr int kQueueExecuteCommandLists = 10, kQueueSignal = 16, kFenceSetEventOnCompletion = 9;
+        constexpr size_t kPutBufferOffset = 16, kPutBufferPointers = 5;
+
+        const QueueDescX qdesc{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, 0, 0};
+        void* queue = nullptr;
+        void* allocator = nullptr;
+        void* list = nullptr;
+        CHECK(slot<CreateQueueXFn>(dev, kDevCreateCommandQueueX)(dev, &qdesc, __uuidof(ID3D12CommandQueue), &queue) == S_OK,
+              "CreateCommandQueueX at slot 48");
+        CHECK(slot<CreateAllocatorFn>(dev, kDevCreateCommandAllocator)(dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                                        __uuidof(ID3D12CommandAllocator), &allocator) == S_OK,
+              "CreateCommandAllocator at slot 9");
+        const ListDescX ldesc{D3D12_COMMAND_LIST_TYPE_DIRECT, 0, 0, 0};
+        hr = slot<CreateListXFn>(dev, kDevCreateCommandListX)(dev, &ldesc, allocator, nullptr,
+                                                              __uuidof(ID3D12GraphicsCommandList), &list);
+        CHECK(hr == S_OK && list, "CreateCommandListX at slot 73 hr=0x%08lx", static_cast<unsigned long>(hr));
+
+        D3D12_HEAP_PROPERTIES readback{};
+        readback.Type = D3D12_HEAP_TYPE_READBACK;
+        void* src = nullptr;
+        void* dst = nullptr;
+        CHECK(slot<CreateCommittedFn>(dev, kDevCreateCommittedResource)(dev, &upload, D3D12_HEAP_FLAG_NONE, &desc,
+                                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                                        __uuidof(ID3D12Resource), &src) == S_OK,
+              "upload buffer at slot 27");
+        CHECK(slot<CreateCommittedFn>(dev, kDevCreateCommittedResource)(dev, &readback, D3D12_HEAP_FLAG_NONE, &desc,
+                                                                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                        __uuidof(ID3D12Resource), &dst) == S_OK,
+              "readback buffer at slot 27");
+        void* fence = nullptr;
+        CHECK(slot<CreateFenceFn>(dev, kDevCreateFence)(dev, 0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), &fence) == S_OK,
+              "CreateFence at slot 36");
+
+        if (queue && allocator && list && src && dst && fence) {
+            // Zero put-buffer pointers make the title's inline fast paths call through the table.
+            const auto* put = reinterpret_cast<const uint64_t*>(static_cast<char*>(list) + kPutBufferOffset);
+            bool zero = true;
+            for (size_t i = 0; i < kPutBufferPointers; ++i) zero = zero && put[i] == 0;
+            CHECK(zero, "command-list put-buffer pointers are zero");
+            CHECK(slot<GetTypeFn>(list, kListGetType)(list) == D3D12_COMMAND_LIST_TYPE_DIRECT, "list GetType at slot 8");
+
+            void* mapped = nullptr;
+            CHECK(slot<MapFn>(src, kResMap)(src, 0, nullptr, &mapped) == S_OK && mapped, "upload Map");
+            if (mapped) std::memset(mapped, 0xa7, 256);
+            D3D12_RESOURCE_BARRIER uav{};
+            uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            uav.UAV.pResource = static_cast<ID3D12Resource*>(src);   // an Xbox object, unwrapped by the shim
+            CHECK(slot<BarrierFn>(list, kListResourceBarrier)(list, 1, &uav) == 0, "ResourceBarrier at slot 26 returns 0");
+            slot<CopyBufferFn>(list, kListCopyBufferRegion)(list, dst, 0, src, 0, 256);
+            CHECK(slot<CloseFn>(list, kListClose)(list) == S_OK, "list Close at slot 9");
+            void* lists[] = {list};
+            slot<ExecuteFn>(queue, kQueueExecuteCommandLists)(queue, 1, lists);
+            CHECK(slot<QueueSignalFn>(queue, kQueueSignal)(queue, fence, 1) == S_OK, "queue Signal at slot 16");
+            HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            CHECK(slot<FenceEventFn>(fence, kFenceSetEventOnCompletion)(fence, 1, done) == S_OK, "fence event at slot 9");
+            CHECK(WaitForSingleObject(done, 5000) == WAIT_OBJECT_0, "GPU work completes");
+            CloseHandle(done);
+            void* result = nullptr;
+            CHECK(slot<MapFn>(dst, kResMap)(dst, 0, nullptr, &result) == S_OK && result, "readback Map");
+            CHECK(result && static_cast<unsigned char*>(result)[0] == 0xa7 && static_cast<unsigned char*>(result)[255] == 0xa7,
+                  "the copy recorded through Xbox objects reached the readback buffer");
+        }
+        for (void* object : {fence, dst, src, list, allocator, queue}) {
+            if (object) slot<RefFn>(object, kRelease)(object);
+        }
+    }
+
+    // Frame pacing: an interval, an origin event, and waits that return new frame tokens.
+    {
+        using SetIntervalFn = HRESULT(STDMETHODCALLTYPE*)(void*, void*, UINT, UINT, UINT);
+        using ScheduleFn = HRESULT(STDMETHODCALLTYPE*)(void*, UINT, UINT, void*, UINT);
+        using WaitFn = HRESULT(STDMETHODCALLTYPE*)(void*, UINT, UINT, void*, UINT, UINT64*);
+        constexpr int kDevSetFrameIntervalX = 78, kDevScheduleFrameEventX = 79, kDevWaitFrameEventX = 80;
+        constexpr UINT kOrigin = 0, kVblank = 1;
+        UINT64 token = 0;
+        CHECK(slot<WaitFn>(dev, kDevWaitFrameEventX)(dev, kVblank, 0, nullptr, 0, &token) == E_INVALIDARG,
+              "waiting on an unscheduled event fails");
+        CHECK(slot<ScheduleFn>(dev, kDevScheduleFrameEventX)(dev, kOrigin, 0, nullptr, 0) == E_INVALIDARG,
+              "scheduling before an interval exists fails");
+        CHECK(slot<SetIntervalFn>(dev, kDevSetFrameIntervalX)(dev, nullptr, 16667, 5, 0) == E_INVALIDARG,
+              "a period above 4 is refused");
+        CHECK(slot<SetIntervalFn>(dev, kDevSetFrameIntervalX)(dev, nullptr, 16667, 1, 0) == S_OK, "SetFrameIntervalX at slot 78");
+        CHECK(slot<ScheduleFn>(dev, kDevScheduleFrameEventX)(dev, kOrigin, 0, nullptr, 0) == S_OK, "ScheduleFrameEventX at slot 79");
+        CHECK(slot<WaitFn>(dev, kDevWaitFrameEventX)(dev, kOrigin, 1000, nullptr, 0, &token) == S_OK && token != 0,
+              "WaitFrameEventX at slot 80 returns a frame token");
+        UINT64 next = 0;
+        CHECK(slot<WaitFn>(dev, kDevWaitFrameEventX)(dev, kOrigin, 1000, nullptr, 0, &next) == S_OK && next > token,
+              "the next origin produces a newer token");
+    }
+
     CHECK(slot<RefFn>(dev, kRelease)(dev) == 0, "device Release at slot 2");
     pc->Release();
 
