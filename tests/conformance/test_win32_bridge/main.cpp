@@ -4,6 +4,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -138,7 +139,43 @@ struct PsmLogCounts {
     size_t constrained_unregistered = 0;
     size_t constrained_foreign = 0;
     size_t constrained_unknown = 0;
+    size_t state_callback_unfired = 0;
+    size_t constrained_callback_unfired = 0;
 };
+
+// Observed `context=0x...` values from the JSONL registration records. The
+// shim logs the context pointer it actually stored for each token, so these
+// are evidence of the round-trip, not of the arguments the test passed.
+struct PsmContextObservations {
+    std::unordered_set<uintptr_t> state_contexts;
+    std::unordered_set<uintptr_t> constrained_contexts;
+    bool saw_context_field = false;
+    bool parse_error = false;
+    // The current shim's unregister records only carry a detail string, so no
+    // context is observable there. Record it instead of asserting the invisible.
+    bool unregister_carries_context = false;
+};
+
+// Extract the `context=0x<hex>` value from a single JSONL line. `%llx` prints
+// lowercase hex with a `0x` prefix and no leading zeros, so strtoull base 16
+// (which accepts the optional `0x`) parses it exactly. Returns false when the
+// field is absent or malformed; `value` is only written on success.
+bool parse_context_field(const std::string& line, uintptr_t& value) {
+    const size_t key = line.find("context=0x");
+    if (key == std::string::npos) {
+        return false;
+    }
+    // Parse from the value, after "context=". Starting at the key would make
+    // strtoull read the hex digit 'c' from "context" and stop at 'o' (#520).
+    const char* start = line.c_str() + key + std::strlen("context=");
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(start, &end, 16);
+    if (end == start) {
+        return false;
+    }
+    value = static_cast<uintptr_t>(parsed);
+    return true;
+}
 
 int64_t query_file_size(const char* path) {
     HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -152,7 +189,8 @@ int64_t query_file_size(const char* path) {
     return ok && size.QuadPart > 0 ? size.QuadPart : 0;
 }
 
-bool count_psm_log_events(const char* path, int64_t start_offset, PsmLogCounts& out) {
+bool count_psm_log_events(const char* path, int64_t start_offset, PsmLogCounts& out,
+                          PsmContextObservations& contexts) {
     HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {
@@ -204,12 +242,37 @@ bool count_psm_log_events(const char* path, int64_t start_offset, PsmLogCounts& 
             continue;
         }
         if (line.find("\"event\":\"RegisterAppStateChangeNotification\"") != std::string::npos &&
+            line.find("callback_unfired") != std::string::npos) {
+            ++out.state_callback_unfired;
+            ++out.state_registered;
+            uintptr_t ctx = 0;
+            if (parse_context_field(line, ctx)) {
+                contexts.saw_context_field = true;
+                contexts.state_contexts.insert(ctx);
+            } else {
+                contexts.parse_error = true;
+            }
+        } else if (line.find("\"event\":\"RegisterAppConstrainedChangeNotification\"") != std::string::npos &&
+                   line.find("callback_unfired") != std::string::npos) {
+            ++out.constrained_callback_unfired;
+            ++out.constrained_registered;
+            uintptr_t ctx = 0;
+            if (parse_context_field(line, ctx)) {
+                contexts.saw_context_field = true;
+                contexts.constrained_contexts.insert(ctx);
+            } else {
+                contexts.parse_error = true;
+            }
+        } else if (line.find("\"event\":\"RegisterAppStateChangeNotification\"") != std::string::npos &&
             line.find("\"detail\":\"registered_offline\"") != std::string::npos) {
             ++out.state_registered;
         } else if (line.find("\"event\":\"RegisterAppConstrainedChangeNotification\"") != std::string::npos &&
                    line.find("\"detail\":\"registered_offline\"") != std::string::npos) {
             ++out.constrained_registered;
         } else if (line.find("\"event\":\"UnregisterAppStateChangeNotification\"") != std::string::npos) {
+            if (line.find("context=0x") != std::string::npos) {
+                contexts.unregister_carries_context = true;
+            }
             if (line.find("\"detail\":\"unregistered\"") != std::string::npos) {
                 ++out.state_unregistered;
             } else if (line.find("\"detail\":\"foreign_token\"") != std::string::npos) {
@@ -218,6 +281,9 @@ bool count_psm_log_events(const char* path, int64_t start_offset, PsmLogCounts& 
                 ++out.state_unknown;
             }
         } else if (line.find("\"event\":\"UnregisterAppConstrainedChangeNotification\"") != std::string::npos) {
+            if (line.find("context=0x") != std::string::npos) {
+                contexts.unregister_carries_context = true;
+            }
             if (line.find("\"detail\":\"unregistered\"") != std::string::npos) {
                 ++out.constrained_unregistered;
             } else if (line.find("\"detail\":\"foreign_token\"") != std::string::npos) {
@@ -324,7 +390,9 @@ bool test_psm() {
                 }
 
                 PsmLogCounts counts{};
-                const bool log_read_ok = count_psm_log_events(log_path, log_start_offset, counts);
+                PsmContextObservations contexts{};
+                const bool log_read_ok =
+                    count_psm_log_events(log_path, log_start_offset, counts, contexts);
                 const bool counts_ok = log_read_ok &&
                     counts.state_registered == kPerFamily &&
                     counts.constrained_registered == kPerFamily &&
@@ -345,7 +413,113 @@ bool test_psm() {
                         counts.constrained_foreign, counts.constrained_unknown);
                 }
 
-                ok = success.load() && unique_ok && !g_callback_called.load() && counts_ok;
+                /* The callbacks are accepted and stored but never invoked, so the
+                 * JSONL detail must say so: ERROR_SUCCESS is bookkeeping only. */
+                const bool fired_never = !g_callback_called.load();
+                if (!fired_never) {
+                    std::fprintf(stderr, "FAIL: a PSM callback fired; the shim has no event source\n");
+                }
+                if (counts.state_callback_unfired != counts.state_registered) {
+                    std::fprintf(stderr,
+                                 "FAIL: %zu of %zu state registrations omit 'callback_unfired'\n",
+                                 counts.state_registered - counts.state_callback_unfired,
+                                 counts.state_registered);
+                }
+                if (counts.constrained_callback_unfired != counts.constrained_registered) {
+                    std::fprintf(stderr,
+                                 "FAIL: %zu of %zu constrained registrations omit 'callback_unfired'\n",
+                                 counts.constrained_registered - counts.constrained_callback_unfired,
+                                 counts.constrained_registered);
+                }
+                const bool limitation_logged = counts.state_callback_unfired == counts.state_registered &&
+                                               counts.constrained_callback_unfired ==
+                                                   counts.constrained_registered;
+
+                /* Context round-trip: the JSONL registration record must print
+                 * the exact context pointer the test passed (&entry), non-zero,
+                 * on BOTH families. A dropped (context=0x0), swapped, or
+                 * mis-tagged context would fail here. */
+                std::unordered_set<uintptr_t> expected_contexts;
+                for (const auto& entries : tokens) {
+                    for (const auto& entry : entries) {
+                        expected_contexts.insert(reinterpret_cast<uintptr_t>(&entry));
+                    }
+                }
+                bool context_roundtrip_ok = contexts.saw_context_field && !contexts.parse_error;
+                if (!contexts.saw_context_field) {
+                    std::fprintf(stderr, "FAIL: no context=0x field observed in PSM registration records\n");
+                }
+                if (contexts.parse_error) {
+                    std::fprintf(stderr, "FAIL: a PSM registration record had a missing/malformed context=\n");
+                }
+                // (1) Every context logged on the state family must be a real
+                //     &entry the test passed, and non-zero.
+                for (const uintptr_t ctx : contexts.state_contexts) {
+                    if (ctx == 0) {
+                        std::fprintf(stderr, "FAIL: state registration logged context=0x0 (dropped context)\n");
+                        context_roundtrip_ok = false;
+                    } else if (expected_contexts.find(ctx) == expected_contexts.end()) {
+                        std::fprintf(stderr,
+                                     "FAIL: state registration logged context=0x%llx that matches no &entry\n",
+                                     static_cast<unsigned long long>(ctx));
+                        context_roundtrip_ok = false;
+                    }
+                }
+                // (1b) Same for the constrained family.
+                for (const uintptr_t ctx : contexts.constrained_contexts) {
+                    if (ctx == 0) {
+                        std::fprintf(stderr, "FAIL: constrained registration logged context=0x0 (dropped context)\n");
+                        context_roundtrip_ok = false;
+                    } else if (expected_contexts.find(ctx) == expected_contexts.end()) {
+                        std::fprintf(stderr,
+                                     "FAIL: constrained registration logged context=0x%llx that matches no &entry\n",
+                                     static_cast<unsigned long long>(ctx));
+                        context_roundtrip_ok = false;
+                    }
+                }
+                // (2) At least two distinct context pointers must appear per
+                //     family, so one registration cannot overwrite another's.
+                if (contexts.state_contexts.size() < 2) {
+                    std::fprintf(stderr,
+                                 "FAIL: only %zu distinct state context pointer(s) logged; expected >=2\n",
+                                 contexts.state_contexts.size());
+                    context_roundtrip_ok = false;
+                }
+                if (contexts.constrained_contexts.size() < 2) {
+                    std::fprintf(stderr,
+                                 "FAIL: only %zu distinct constrained context pointer(s) logged; expected >=2\n",
+                                 contexts.constrained_contexts.size());
+                    context_roundtrip_ok = false;
+                }
+                // (3) Family tagging: the test passes the SAME &entry to both
+                //     families, so the constrained record for an entry must
+                //     carry that entry's pointer too. With 64 registrations per
+                //     family the full set of &entry pointers must round-trip on
+                //     each family independently.
+                if (contexts.state_contexts != expected_contexts) {
+                    std::fprintf(stderr,
+                                 "FAIL: state contexts (%zu) do not cover all %zu &entry pointers\n",
+                                 contexts.state_contexts.size(), expected_contexts.size());
+                    context_roundtrip_ok = false;
+                }
+                if (contexts.constrained_contexts != expected_contexts) {
+                    std::fprintf(stderr,
+                                 "FAIL: constrained contexts (%zu) do not cover all %zu &entry pointers\n",
+                                 contexts.constrained_contexts.size(), expected_contexts.size());
+                    context_roundtrip_ok = false;
+                }
+                // (4) Unregister context: the shim's unregister records carry
+                //     only a detail string, so context-drop on unregister is
+                //     not observable in the log. Assert nothing invisible; just
+                //     document the limitation.
+                if (contexts.unregister_carries_context) {
+                    std::fprintf(stderr,
+                                 "NOTE: unregister records unexpectedly carry context=; "
+                                 "context-drop on unregister is now observable\n");
+                }
+
+                ok = success.load() && unique_ok && fired_never && counts_ok && limitation_logged &&
+                     context_roundtrip_ok;
             }
         }
     }
@@ -367,6 +541,7 @@ int main() {
         std::fprintf(stderr, "FAIL: PSM bridge registration lifecycle\n");
         return 2;
     }
-    std::puts("PASS: test_win32_bridge (hidden window, message pump, 128 PSM registrations, per-event log verified)");
+    std::puts("PASS: test_win32_bridge (hidden window, message pump, 128 PSM registrations, "
+              "per-event log + context round-trip verified)");
     return 0;
 }

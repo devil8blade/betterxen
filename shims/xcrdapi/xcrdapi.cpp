@@ -913,6 +913,17 @@ bool reserved_fields_clear(const DSTORAGE_REQUEST_OPTIONS& options) {
 // (the header: an empty queue reports capacity - 1 empty slots), and requests
 // are submitted automatically once N / 2 are waiting (the header: "until the
 // queue is half full").
+// Maps the engine's command kind onto the header's DSTORAGE_COMMAND_TYPE for
+// RetrieveErrorRecord on the public PC queue.
+DSTORAGE_COMMAND_TYPE command_type(Kind kind) {
+    switch (kind) {
+        case Kind::status: return DSTORAGE_COMMAND_TYPE_STATUS;
+        case Kind::signal: return DSTORAGE_COMMAND_TYPE_SIGNAL;
+        case Kind::event: return DSTORAGE_COMMAND_TYPE_EVENT;
+        default: return DSTORAGE_COMMAND_TYPE_REQUEST;
+    }
+}
+
 class PublicQueue final : public PublicObject<IDStorageQueue4> {
 public:
     PublicQueue(WorkQueue* queue, const DSTORAGE_QUEUE_DESC1& desc) : queue_(queue), desc_(desc) {
@@ -1043,15 +1054,6 @@ private:
         return IsEqualIID(riid, __uuidof(IDStorageQueue)) || IsEqualIID(riid, __uuidof(IDStorageQueue1))
             || IsEqualIID(riid, __uuidof(IDStorageQueue2)) || IsEqualIID(riid, __uuidof(IDStorageQueue3))
             || IsEqualIID(riid, __uuidof(IDStorageQueue4));
-    }
-
-    static DSTORAGE_COMMAND_TYPE command_type(Kind kind) {
-        switch (kind) {
-            case Kind::status: return DSTORAGE_COMMAND_TYPE_STATUS;
-            case Kind::signal: return DSTORAGE_COMMAND_TYPE_SIGNAL;
-            case Kind::event: return DSTORAGE_COMMAND_TYPE_EVENT;
-            default: return DSTORAGE_COMMAND_TYPE_REQUEST;
-        }
     }
 
     // Maps a DSTORAGE_REQUEST onto the engine's Request. Only uncompressed
@@ -1264,17 +1266,412 @@ private:
         return publish(wrapper, riid, ppv);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Xbox Series DirectStorage COM interfaces (IDStorage*X), inferred from call-site
+// observation of a project-authorized target build (provenance pending maintainer
+// review; not a public contract), layered over the same WorkQueue / StorageFile /
+// StatusArray engine. Unimplemented vtable slots log through BX_VTABLE_STUB_LOG
+// so any newly reached slot surfaces immediately in bx-cli trace.
+// ---------------------------------------------------------------------------
+
+constexpr IID kXboxFactoryIid{0x62959d11, 0xd45f, 0x4884, {0xa0, 0xa3, 0xf7, 0x86, 0x2e, 0xa2, 0x43, 0xae}};
+constexpr IID kXboxFileIid{0x43704f9f, 0x27c6, 0x4a9f, {0x88, 0x15, 0xd1, 0x65, 0x27, 0x89, 0x4d, 0xf4}};
+constexpr IID kXboxStatusArrayIid{0xcd66d752, 0x2786, 0x44f7, {0x90, 0x70, 0xe2, 0xa6, 0xfd, 0xad, 0x3f, 0x1b}};
+constexpr IID kXboxQueueIid{0x3c02cb0c, 0xc050, 0x4195, {0x99, 0xa1, 0xa1, 0xce, 0x94, 0xba, 0x33, 0xc5}};
+
+struct XboxQueueDesc {
+    UINT64 source_type;
+    UINT16 capacity;
+    INT8 priority;
+    UINT8 reserved_pad[5];
+    PCSTR name;
+    UINT64 flags;
+};
+static_assert(sizeof(XboxQueueDesc) == 32, "XboxQueueDesc must be 32 bytes");
+static_assert(offsetof(XboxQueueDesc, source_type) == 0x00, "source_type offset");
+static_assert(offsetof(XboxQueueDesc, capacity) == 0x08, "capacity offset");
+static_assert(offsetof(XboxQueueDesc, priority) == 0x0a, "priority offset");
+static_assert(offsetof(XboxQueueDesc, name) == 0x10, "name offset");
+static_assert(offsetof(XboxQueueDesc, flags) == 0x18, "flags offset");
+
+struct XboxRequest {
+    UINT64 options;          // +0x00: bit 22 (0x400000) = memory source, bit 0 = compressed
+    void* destination;       // +0x08
+    UINT64 destination_pad;  // +0x10
+    UINT32 destination_size; // +0x18
+    UINT32 reserved1c;       // +0x1c
+    void* source_ptr;        // +0x20: IXboxDStorageFile* (file) or const void* (memory)
+    UINT64 file_offset;      // +0x28
+    UINT32 source_size;      // +0x30
+    UINT32 reserved34;       // +0x34
+};
+static_assert(sizeof(XboxRequest) == 56, "XboxRequest must be 56 bytes");
+static_assert(offsetof(XboxRequest, options) == 0x00, "options offset");
+static_assert(offsetof(XboxRequest, destination) == 0x08, "destination offset");
+static_assert(offsetof(XboxRequest, destination_size) == 0x18, "destination_size offset");
+static_assert(offsetof(XboxRequest, source_ptr) == 0x20, "source_ptr offset");
+static_assert(offsetof(XboxRequest, file_offset) == 0x28, "file_offset offset");
+static_assert(offsetof(XboxRequest, source_size) == 0x30, "source_size offset");
+
+constexpr UINT64 kXboxRequestSourceMemoryBit = 0x400000ull;
+constexpr UINT64 kXboxRequestCompressedBit = 0x1ull;
+
+struct IXboxDStorageFile : IUnknown {
+    virtual void STDMETHODCALLTYPE Close() = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetFileInformation(BY_HANDLE_FILE_INFORMATION* info) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot5() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot6() = 0;
+};
+
+struct IXboxDStorageStatusArray : IUnknown {
+    virtual bool STDMETHODCALLTYPE IsComplete(UINT32 index) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot5() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot6() = 0;
+};
+
+struct IXboxDStorageQueue : IUnknown {
+    virtual void STDMETHODCALLTYPE EnqueueRequest(const XboxRequest* request) = 0;
+    virtual void STDMETHODCALLTYPE EnqueueStatus(IXboxDStorageStatusArray* status_array, UINT32 index) = 0;
+    virtual void STDMETHODCALLTYPE EnqueueSignal(ID3D12Fence* fence, UINT64 value) = 0;
+    virtual void STDMETHODCALLTYPE Submit() = 0;
+    virtual void STDMETHODCALLTYPE CancelRequestsWithTag(UINT64 mask, UINT64 value) = 0;
+    virtual void STDMETHODCALLTYPE Close() = 0;
+    virtual HANDLE STDMETHODCALLTYPE GetErrorEvent() = 0;
+    virtual void STDMETHODCALLTYPE RetrieveErrorRecord(void* record) = 0;
+    virtual void STDMETHODCALLTYPE Query(void* info) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot12() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot13() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot14() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot15() = 0;
+};
+
+struct IXboxDStorageFactory : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE CreateQueue(const void* desc, REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE OpenFile(const WCHAR* path, REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateStatusArray(UINT32 capacity, PCSTR name, REFIID riid, void** ppv) = 0;
+    virtual void STDMETHODCALLTYPE SetDebugFlags(UINT32 flags) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot7() = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetStagingBufferSize(UINT32 size) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot9() = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateQueueX(const XboxQueueDesc* desc, REFIID riid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot11() = 0;
+    virtual HRESULT STDMETHODCALLTYPE StubSlot12() = 0;
+};
+
+class XboxFile final : public PublicObject<IXboxDStorageFile> {
+public:
+    explicit XboxFile(StorageFile* file) : file_(file) {}
+
+    void STDMETHODCALLTYPE Close() override { (void)file_->Close(); }
+    HRESULT STDMETHODCALLTYPE GetFileInformation(BY_HANDLE_FILE_INFORMATION* info) override {
+        return file_->GetFileInformation(info);
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot5() override {
+        BX_VTABLE_STUB_LOG("IDStorageFileX", 5u, "Slot5");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot6() override {
+        BX_VTABLE_STUB_LOG("IDStorageFileX", 6u, "Slot6");
+        return E_NOTIMPL;
+    }
+
+    File* inner() const { return file_; }
+
+private:
+    ~XboxFile() override { file_->Release(); }
+    bool supports(REFIID riid) const override { return IsEqualIID(riid, kXboxFileIid); }
+
+    StorageFile* file_;
+};
+
+class XboxStatusArray final : public PublicObject<IXboxDStorageStatusArray> {
+public:
+    explicit XboxStatusArray(StatusArray* array) : array_(array) {}
+
+    bool STDMETHODCALLTYPE IsComplete(UINT32 index) override { return array_->GetResult(index) != E_PENDING; }
+    HRESULT STDMETHODCALLTYPE GetHResult(UINT32 index) override { return array_->GetResult(index); }
+    HRESULT STDMETHODCALLTYPE StubSlot5() override {
+        BX_VTABLE_STUB_LOG("IDStorageStatusArrayX", 5u, "Slot5");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot6() override {
+        BX_VTABLE_STUB_LOG("IDStorageStatusArrayX", 6u, "Slot6");
+        return E_NOTIMPL;
+    }
+
+    StatusArray* inner() const { return array_; }
+
+private:
+    ~XboxStatusArray() override { array_->Release(); }
+    bool supports(REFIID riid) const override { return IsEqualIID(riid, kXboxStatusArrayIid); }
+
+    StatusArray* array_;
+};
+
+class XboxQueue final : public PublicObject<IXboxDStorageQueue> {
+public:
+    XboxQueue(WorkQueue* queue, UINT64 source_type) : queue_(queue), source_type_(source_type) {}
+
+    void STDMETHODCALLTYPE EnqueueRequest(const XboxRequest* request) override {
+        if (!request) {
+            reject(E_INVALIDARG, Kind::request, "EnqueueRequest");
+            return;
+        }
+        const bool is_memory = (request->options & kXboxRequestSourceMemoryBit) != 0;
+        if ((is_memory && source_type_ == 0) || (!is_memory && source_type_ != 0)) {
+            reject(E_DSTORAGE_INVALID_SOURCE_TYPE, Kind::request, "EnqueueRequest");
+            return;
+        }
+        if ((request->options & kXboxRequestCompressedBit) != 0) {
+            BX_VTABLE_STUB_LOG("IDStorageQueueX", 3u, "EnqueueRequest_compressed");
+            reject(E_NOTIMPL, Kind::request, "EnqueueRequest");
+            return;
+        }
+        if (!request->destination || request->source_size != request->destination_size) {
+            reject(E_DSTORAGE_INVALID_DESTINATION_SIZE, Kind::request, "EnqueueRequest");
+            return;
+        }
+
+        Request translated{};
+        translated.destination = request->destination;
+        translated.size = request->source_size;
+        if (is_memory) {
+            if (!request->source_ptr) {
+                reject(E_INVALIDARG, Kind::request, "EnqueueRequest");
+                return;
+            }
+            translated.source = request->source_ptr;
+        } else {
+            auto* file = public_impl<XboxFile>(static_cast<IXboxDStorageFile*>(request->source_ptr));
+            if (!file) {
+                reject(E_DSTORAGE_FILE_NOT_OPEN, Kind::request, "EnqueueRequest");
+                return;
+            }
+            translated.file = file->inner();
+            translated.file_offset = request->file_offset;
+        }
+        accept(queue_->EnqueueRequest(&translated), Kind::request, "EnqueueRequest");
+    }
+
+    void STDMETHODCALLTYPE EnqueueStatus(IXboxDStorageStatusArray* status_array, UINT32 index) override {
+        auto* array = public_impl<XboxStatusArray>(status_array);
+        if (!array) {
+            reject(E_DSTORAGE_INVALID_STATUS_ARRAY, Kind::status, "EnqueueStatus");
+            return;
+        }
+        HRESULT hr = queue_->EnqueueStatus(array->inner(), index);
+        if (hr == E_INVALIDARG) hr = E_DSTORAGE_INDEX_BOUND;
+        accept(hr, Kind::status, "EnqueueStatus");
+    }
+
+    void STDMETHODCALLTYPE EnqueueSignal(ID3D12Fence* fence, UINT64 value) override {
+        if (!fence) {
+            reject(E_DSTORAGE_INVALID_FENCE, Kind::signal, "EnqueueSignal");
+            return;
+        }
+        accept(queue_->EnqueueSignal(fence, value), Kind::signal, "EnqueueSignal");
+    }
+
+    void STDMETHODCALLTYPE Submit() override {
+        if (FAILED(queue_->Submit())) {
+            bx_log_emit(BX_LOG_WARN, "xcrdapi", "dstorage_queue_closed", "Submit after Close; nothing submitted");
+        }
+    }
+
+    void STDMETHODCALLTYPE CancelRequestsWithTag(UINT64, UINT64) override {
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 7u, "CancelRequestsWithTag");
+    }
+
+    void STDMETHODCALLTYPE Close() override { (void)queue_->Close(); }
+
+    HANDLE STDMETHODCALLTYPE GetErrorEvent() override { return queue_->error_event(); }
+
+    void STDMETHODCALLTYPE RetrieveErrorRecord(void*) override {
+        // The size and layout of the Xbox caller's output are unverified.
+        // Do not write the public PC record into it.
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 10u, "RetrieveErrorRecord");
+    }
+
+    void STDMETHODCALLTYPE Query(void*) override { BX_VTABLE_STUB_LOG("IDStorageQueueX", 11u, "Query"); }
+    HRESULT STDMETHODCALLTYPE StubSlot12() override {
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 12u, "Slot12");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot13() override {
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 13u, "Slot13");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot14() override {
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 14u, "Slot14");
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE StubSlot15() override {
+        BX_VTABLE_STUB_LOG("IDStorageQueueX", 15u, "Slot15");
+        return E_NOTIMPL;
+    }
+
+private:
+    ~XboxQueue() override { queue_->Release(); }
+    bool supports(REFIID riid) const override { return IsEqualIID(riid, kXboxQueueIid); }
+
+    void reject(HRESULT hr, Kind kind, const char* method) {
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "xbox %s hr=0x%08lx", method, static_cast<unsigned long>(hr));
+        bx_log_emit(BX_LOG_WARN, "xcrdapi", "dstorage_enqueue_rejected", detail);
+        if (FAILED(queue_->enqueue_failure(hr, kind))) {
+            bx_log_emit(BX_LOG_WARN, "xcrdapi", "dstorage_queue_closed", "enqueue after Close; command dropped");
+        }
+    }
+
+    void accept(HRESULT hr, Kind kind, const char* method) {
+        if (SUCCEEDED(hr)) return;
+        if (queue_->closed()) {
+            bx_log_emit(BX_LOG_WARN, "xcrdapi", "dstorage_queue_closed", "enqueue after Close; command dropped");
+            return;
+        }
+        reject(hr, kind, method);
+    }
+
+    WorkQueue* queue_;
+    UINT64 source_type_;
+};
+
+class XboxFactory final : public PublicObject<IXboxDStorageFactory> {
+public:
+    HRESULT STDMETHODCALLTYPE CreateQueue(const void*, REFIID, void** ppv) override {
+        if (ppv) *ppv = nullptr;
+        BX_VTABLE_STUB_LOG("IDStorageFactoryX", 3u, "CreateQueue");
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE OpenFile(const WCHAR* path, REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (!path || !*path) return E_INVALIDARG;
+        HANDLE handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                    FILE_FLAG_OVERLAPPED, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return win32_error();
+        auto* file = new (std::nothrow) StorageFile(handle);
+        if (!file) {
+            CloseHandle(handle);
+            return E_OUTOFMEMORY;
+        }
+        auto* wrapper = new (std::nothrow) XboxFile(file);
+        if (!wrapper) {
+            file->Release();
+            return E_OUTOFMEMORY;
+        }
+        return publish(wrapper, riid, ppv);
+    }
+
+    HRESULT STDMETHODCALLTYPE CreateStatusArray(UINT32 capacity, PCSTR, REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (!capacity || capacity > 65535) return E_INVALIDARG;
+        auto* slots = new (std::nothrow) StatusArray::Slot[capacity];
+        if (!slots) return E_OUTOFMEMORY;
+        auto* array = new (std::nothrow) StatusArray(slots, capacity);
+        if (!array) {
+            delete[] slots;
+            return E_OUTOFMEMORY;
+        }
+        auto* wrapper = new (std::nothrow) XboxStatusArray(array);
+        if (!wrapper) {
+            array->Release();
+            return E_OUTOFMEMORY;
+        }
+        return publish(wrapper, riid, ppv);
+    }
+
+    void STDMETHODCALLTYPE SetDebugFlags(UINT32 flags) override {
+        if (flags) BX_VTABLE_STUB_LOG("IDStorageFactoryX", 6u, "SetDebugFlags");
+    }
+
+    HRESULT STDMETHODCALLTYPE StubSlot7() override {
+        BX_VTABLE_STUB_LOG("IDStorageFactoryX", 7u, "Slot7");
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE SetStagingBufferSize(UINT32 size) override {
+        char detail[80];
+        /* Like the public factory: the engine has no staging buffer to size. */
+        std::snprintf(detail, sizeof(detail), "xbox size=%lu has no effect", static_cast<unsigned long>(size));
+        bx_log_emit(BX_LOG_INFO, "xcrdapi", "dstorage_staging_buffer_size", detail);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE StubSlot9() override {
+        BX_VTABLE_STUB_LOG("IDStorageFactoryX", 9u, "Slot9");
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE CreateQueueX(const XboxQueueDesc* desc, REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (!desc) return E_INVALIDARG;
+        if (desc->capacity < 2 || desc->capacity > DSTORAGE_MAX_QUEUE_CAPACITY) {
+            return E_DSTORAGE_INVALID_QUEUE_CAPACITY;
+        }
+        if (desc->source_type > 1) {
+            return E_DSTORAGE_INVALID_SOURCE_TYPE;
+        }
+        /* desc->priority is ignored on purpose: the Xbox priority range is not part of
+         * the inferred contract, so no value is rejected (the public queue's
+         * E_DSTORAGE_INVALID_QUEUE_PRIORITY range check is not assumed to apply). */
+        const UINT slots = desc->capacity - 1u;
+        auto* entries = new (std::nothrow) Entry[slots];
+        if (!entries) return E_OUTOFMEMORY;
+        auto* queue = new (std::nothrow) WorkQueue(entries, slots, true, desc->capacity / 2u);
+        if (!queue) {
+            delete[] entries;
+            return E_OUTOFMEMORY;
+        }
+        if (!queue->create_work()) {
+            const HRESULT error = win32_error();
+            queue->Release();
+            return error;
+        }
+        auto* wrapper = new (std::nothrow) XboxQueue(queue, desc->source_type);
+        if (!wrapper) {
+            queue->Release();
+            return E_OUTOFMEMORY;
+        }
+        return publish(wrapper, riid, ppv);
+    }
+
+    HRESULT STDMETHODCALLTYPE StubSlot11() override {
+        BX_VTABLE_STUB_LOG("IDStorageFactoryX", 11u, "Slot11");
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE StubSlot12() override {
+        BX_VTABLE_STUB_LOG("IDStorageFactoryX", 12u, "Slot12");
+        return E_NOTIMPL;
+    }
+
+private:
+    bool supports(REFIID riid) const override { return IsEqualIID(riid, kXboxFactoryIid); }
+};
 } // namespace
 
 // Accepts BetterXen's synthetic factory IID and IUnknown (the synthetic factory),
-// and the public PC IDStorageFactory / IDStorageFactory1. Any other IID is logged
-// with its value so `bx-cli trace` names the interface a guest asked for.
+// the public PC IDStorageFactory / IDStorageFactory1, and the inferred Xbox
+// IDStorageFactoryX IID. Any other IID is logged with its value so `bx-cli trace`
+// names the interface a guest asked for.
 extern "C" HRESULT WINAPI DStorageGetFactory(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
     if (IsEqualIID(riid, __uuidof(IDStorageFactory)) || IsEqualIID(riid, __uuidof(IDStorageFactory1))) {
         auto* factory = new (std::nothrow) PublicFactory;
         return factory ? publish(factory, riid, ppv) : E_OUTOFMEMORY;
+    }
+    if (IsEqualIID(riid, kXboxFactoryIid)) {
+        auto* factory = new (std::nothrow) XboxFactory;
+        if (!factory) return E_OUTOFMEMORY;
+        bx_log_emit(BX_LOG_INFO, "xcrdapi", "dstorage_get_factory", "dispatch xbox_com=IDStorageFactoryX");
+        return publish(factory, riid, ppv);
     }
     if (!IsEqualIID(riid, factory_iid) && !IsEqualIID(riid, IID_IUnknown)) {
         char iid[40];

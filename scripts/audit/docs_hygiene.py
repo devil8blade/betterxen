@@ -21,10 +21,16 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[2]
-MARKER = re.compile(r"^(<{7}( |$)|={7}$|>{7}( |$))")
+MARKER = re.compile(r"^(<{7}( |$)|\|{7}( |$)|={7}$|>{7}( |$))")
 LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+# GitHub slugs the rendered heading, so an inline link contributes only its
+# text: ``## See [ADR](x.md)`` slugs as ``see-adr``, not ``see-adrxmd``.
+# Link syntax inside a code span stays literal, so those spans are set aside
+# before substituting and put back afterwards.
+INLINE_LINK = re.compile(r"(?<!\!)\[([^\]]*)\]\([^)]*\)")
+CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 
 
 def tracked():
@@ -47,6 +53,21 @@ def _slug(text):
     return text.replace(" ", "-")
 
 
+def _heading_text(text):
+    """Rendered text of a heading: link text in, code spans left literal."""
+    spans = []
+
+    def stash(match):
+        spans.append(match.group(0))
+        return "\x00%d\x00" % (len(spans) - 1)
+
+    stashed = CODE_SPAN.sub(stash, text)
+    substituted = INLINE_LINK.sub(r"\1", stashed)
+    for index, span in enumerate(spans):
+        substituted = substituted.replace("\x00%d\x00" % index, span)
+    return substituted
+
+
 def markdown_slugs(body):
     """Return the set of GitHub-style heading slugs in a Markdown document.
 
@@ -65,7 +86,7 @@ def markdown_slugs(body):
         m = HEADING.match(line)
         if not m:
             continue
-        base = _slug(m.group(2))
+        base = _slug(_heading_text(m.group(2)))
         if not base:
             continue
         # Advance the numeric suffix until we find a slug that has not

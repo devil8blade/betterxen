@@ -447,7 +447,7 @@ mod tests {
         std::fs::write(
             &server,
             format!(
-                "#!/bin/sh\n/bin/ps -o pgid= -p $$ >> '{}'\n",
+                "#!/bin/sh\n/usr/bin/perl -MPOSIX -e 'print getpgrp(), \"\\n\"' >> '{}'\n",
                 seen.display()
             ),
         )

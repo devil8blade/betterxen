@@ -47,19 +47,28 @@ HRESULT WINAPI AcpHalCreate(void** out) {
     return *out ? S_OK : E_OUTOFMEMORY;
 }
 
-HRESULT WINAPI AcpHalAllocateShapeContexts(void*) {
+// NDA constraint: the public Microsoft Learn page for AcpHal is gated behind
+// an Xbox developer NDA, so the true signatures and context layout are unknown
+// from public sources. BetterXen therefore returns E_NOTIMPL (not the console's
+// behaviour) and keeps the stub log so bx-cli trace still surfaces the call.
+HRESULT WINAPI AcpHalAllocateShapeContexts(void* context) {
+    (void)context;
     BX_STUB_LOG("AcpHal.dll", "AcpHalAllocateShapeContexts");
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI AcpHalReleaseShapeContexts(void) {
     BX_STUB_LOG("AcpHal.dll", "AcpHalReleaseShapeContexts");
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI ApuCreateHeap(uint32_t cached, uint32_t non_cached) {
     std::lock_guard guard(heap_lock);
     if (allocations) return HRESULT_FROM_WIN32(ERROR_BUSY);
+    // A zero-capacity heap must not report S_OK: it can never satisfy an
+    // allocation, so creating it is a caller error (#580). ApuAlloc already
+    // refused such requests with E_OUTOFMEMORY.
+    if (uint64_t(cached) + non_cached == 0) return E_INVALIDARG;
     // Invariant: allocations == nullptr implies used == 0; reset explicitly.
     used = 0;
     capacity = uint64_t(cached) + non_cached;

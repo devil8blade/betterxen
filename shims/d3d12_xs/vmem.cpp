@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <new>
 
 /*
@@ -52,6 +53,11 @@ constexpr GUID kPlacedResourceHeap = {0x3a652cbb, 0xb5b3, 0x4e09, {0xb3, 0x6c, 0
 
 struct Record {
     bool configured = false;
+    bool xbox_configured = false;
+    uint32_t xbox_page_table_4mb_pages = 0;
+    uint32_t xbox_frame_buffer_preserve_bytes = 0;
+    /* D3D12ConfigureVirtualMemoryX fails with E_FAIL once a device exists. */
+    bool device_created = false;
     bool backing_opt_in = false;
     bx_hardware_profile_t profile = BX_PROFILE_LOCKHART;
     uint64_t title_limit = 0;
@@ -60,9 +66,10 @@ struct Record {
     uint64_t config_size = 0;
     uint64_t config_generation = 0;
     bx_xmem_region_info_t region{};
-    /* Bytes of host heaps still alive. D3DMetal keeps freed memory in its own
-       pool, so this counts live heaps only: charge on create, credit on the
-       final Release. It does not assume the OS reclaimed the pages. */
+    /* Diagnostic mirror of the external xmem charges for live host heaps.
+       D3DMetal keeps freed memory in its own pool, so this counts live heaps
+       only: charge on create, credit on the final Release. It does not assume
+       the OS reclaimed the pages. xmem's external_bytes is authoritative. */
     uint64_t charged_private_bytes = 0;
     uint64_t cpu_pointer = 0;
     class BxChargedHeap* backing = nullptr;
@@ -96,44 +103,43 @@ uint64_t title_limit() {
     return 8ull << 30;
 }
 
-uint64_t active_cap(const bx_xmem_stats_t& stats) {
-    uint64_t cap = title_limit();
-    if (stats.title_limit_bytes != 0 && stats.title_limit_bytes < cap) {
-        cap = stats.title_limit_bytes;
-    }
-    return cap;
-}
-
 const char* profile_name(bx_hardware_profile_t profile) {
     return profile == BX_PROFILE_ANACONDA ? "anaconda" : "lockhart";
 }
 
-/* Private host heaps count against the same Lockhart/Anaconda cap as xmem. */
+/* Private host heaps count against the same Lockhart/Anaconda cap as xmem.
+ * xmem's external_bytes is the authoritative ledger: bx_xmem_try_charge_external
+ * admits atomically under usage_lock, against every owner, so no local pre-check
+ * can add anything correct (a snapshot taken outside that lock would also count
+ * live graphics heaps twice now that xmem's stats include external charges).
+ * The local mirror is kept only for the gpu_heap_bytes diagnostic log; it cannot
+ * wrap, because xmem has already admitted `bytes` under a cap <= UINT64_MAX.
+ * The hook is called while g_section is held (lock order g_section ->
+ * usage_lock, matching every other path in both DLLs). */
 bool try_charge(uint64_t bytes) {
     Guard guard(g_section);
-    bx_xmem_stats_t stats{};
-    bx_xmem_get_internal_stats(&stats);
-    const uint64_t cap = active_cap(stats);
-    const uint64_t xmem_used = stats.committed_virtual_bytes + stats.allocated_physical_bytes;
-    if (bytes > cap || xmem_used > cap || g_record.charged_private_bytes > cap - xmem_used) {
+    if (!bx_xmem_try_charge_external(bytes)) {
         return false;
     }
-    const uint64_t room = cap - xmem_used - g_record.charged_private_bytes;
-    if (bytes > room) {
-        return false;
-    }
-    g_record.charged_private_bytes += bytes;
+    g_record.charged_private_bytes += bytes; /* diagnostic mirror */
     return true;
 }
 
+/* Each heap wrapper calls this exactly once, on its final Release, which is what
+ * keeps a heap from being released twice. The mirror check below is a coarse
+ * guard on the total: it refuses a release larger than all outstanding graphics
+ * charges (refusing leaves a charge in place, so the cap stays strict), but as a
+ * single total it cannot tell one heap's double release from another heap's
+ * charge. */
 void release_charge(uint64_t bytes) {
     Guard guard(g_section);
     if (bytes > g_record.charged_private_bytes) {
-        bx_log_emit(BX_LOG_ERROR, "d3d12_xs", "heap_budget", "GPU heap charge underflow on release");
-        g_record.charged_private_bytes = 0;
+        bx_log_emit(BX_LOG_ERROR, "d3d12_xs", "heap_budget",
+                    "GPU heap charge underflow on release; xmem charge left unchanged");
         return;
     }
     g_record.charged_private_bytes -= bytes;
+    bx_xmem_release_charge_external(bytes);
 }
 
 /*
@@ -698,48 +704,124 @@ struct ConfigHeader {
 };
 static_assert(sizeof(ConfigHeader) == 8, "config probe is the 8-byte header");
 
-void write_cpu_pointer(void* config, uint64_t pointer) {
-    std::memcpy(static_cast<char*>(config) + offsetof(BxD3d12VirtualMemoryConfig, cpu_pointer), &pointer, sizeof(pointer));
+bool is_accessible_protect(DWORD protect, bool write) {
+    if ((protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    switch (protect & 0xFFu) {
+    case PAGE_READWRITE:
+    case PAGE_WRITECOPY:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return true;
+    case PAGE_READONLY:
+    case PAGE_EXECUTE_READ:
+        return !write;
+    default:
+        return false;
+    }
 }
 
-} // namespace
-
-extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config) {
-    if (!config) {
-        /* Titles call this before reserving memory and require S_OK. */
-        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
-        return S_OK;
+bool can_access_bytes(const void* ptr, size_t len, bool write) {
+    if (!ptr || len == 0) {
+        return false;
     }
-    /*
-     * PVOID has no size. Read 8 bytes, and only then the rest of a block that
-     * names this struct. A mismatch is left untouched.
-     */
-    ConfigHeader header{};
-    std::memcpy(&header, config, sizeof(header));
-    if (header.magic != BX_D3D12_VMEM_MAGIC || header.struct_size != sizeof(BxD3d12VirtualMemoryConfig)) {
-        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
-        return S_OK;
+    const uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    if (start > std::numeric_limits<uintptr_t>::max() - len) {
+        return false;
     }
+    const uintptr_t end = start + len;
+    uintptr_t cursor = start;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) == 0) {
+            return false;
+        }
+        if (mbi.State != MEM_COMMIT || !is_accessible_protect(mbi.Protect, write) || mbi.RegionSize == 0) {
+            return false;
+        }
+        const uintptr_t region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        if (region_base > cursor || mbi.RegionSize > std::numeric_limits<uintptr_t>::max() - region_base) {
+            return false;
+        }
+        const uintptr_t region_end = region_base + mbi.RegionSize;
+        if (region_end <= cursor) {
+            return false;
+        }
+        cursor = region_end;
+    }
+    return true;
+}
 
+bool copy_readable_bytes(const void* source, void* destination, size_t len) {
+    if (!destination || !can_access_bytes(source, len, false)) {
+        return false;
+    }
+    SIZE_T bytes_read = 0;
+    return ReadProcessMemory(GetCurrentProcess(), source, destination, len, &bytes_read) != 0 && bytes_read == len;
+}
+
+bool write_cpu_pointer(void* config, uint64_t pointer) {
+    auto* destination = static_cast<char*>(config) + offsetof(BxD3d12VirtualMemoryConfig, cpu_pointer);
+    if (!can_access_bytes(destination, sizeof(pointer), true)) {
+        return false;
+    }
+    SIZE_T bytes_written = 0;
+    return WriteProcessMemory(GetCurrentProcess(), destination, &pointer, sizeof(pointer), &bytes_written) != 0 &&
+           bytes_written == sizeof(pointer);
+}
+
+/* Writes `len` bytes at `offset` in caller memory, after checking the range is writable. */
+bool write_config_bytes(void* config, size_t offset, const void* source, size_t len) {
+    auto* destination = static_cast<char*>(config) + offset;
+    if (!can_access_bytes(destination, len, true)) {
+        return false;
+    }
+    SIZE_T bytes_written = 0;
+    return WriteProcessMemory(GetCurrentProcess(), destination, source, len, &bytes_written) != 0 &&
+           bytes_written == len;
+}
+
+void log_vmem_fallback(const char* decoder, const char* reason) {
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "decoder=%s applied=0 reason=%s", decoder, reason);
+    bx_log_emit(BX_LOG_WARN, "d3d12_xs", "vmem_config_fallback", detail);
+}
+
+void log_vmem_failed(const char* decoder, const char* reason, HRESULT hr) {
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "decoder=%s applied=0 reason=%s hr=0x%08lx", decoder, reason,
+                  static_cast<unsigned long>(hr));
+    bx_log_emit(BX_LOG_WARN, "d3d12_xs", "vmem_config_failed", detail);
+}
+
+HRESULT decode_bxvm_config(void* config) {
     BxD3d12VirtualMemoryConfig in{};
-    std::memcpy(&in, config, sizeof(in));
+    if (!copy_readable_bytes(config, &in, sizeof(in))) {
+        log_vmem_fallback("bxvm", "unreadable_tail");
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return S_OK;
+    }
+
     const uint32_t unknown_flags = in.flags & ~BX_D3D12_VMEM_FLAG_BACKING_HEAP;
     if (in.version != kConfigVersion || unknown_flags != 0 || in.reserved != 0) {
         /* A console parameter block is not this struct. Leave those bytes alone. */
+        log_vmem_fallback("bxvm", "unsupported_options");
         BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
         return S_OK;
     }
-
     const bx_runtime_config_t* cfg = bx_get_runtime_config();
     const uint64_t cap = title_limit();
     const auto profile = (cfg && cfg->profile == BX_PROFILE_ANACONDA) ? BX_PROFILE_ANACONDA : BX_PROFILE_LOCKHART;
     if (in.size_bytes != 0 && (in.size_bytes % k64K != 0 || in.size_bytes > cap)) {
+        log_vmem_failed("bxvm", "invalid_size", E_INVALIDARG);
         return E_INVALIDARG;
     }
 
     bx_xmem_stats_t stats{};
     bx_xmem_get_internal_stats(&stats);
     if (in.size_bytes != 0 && stats.title_limit_bytes != 0 && in.size_bytes > stats.title_limit_bytes) {
+        log_vmem_failed("bxvm", "exceeds_xmem_limit", E_INVALIDARG);
         return E_INVALIDARG;
     }
 
@@ -749,16 +831,19 @@ extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config) {
         bx_xmem_region_info_t first{};
         if (!bx_xmem_query_region(in.base_va, &first) || first.size_bytes == 0 || first.base_va != in.base_va ||
             first.base_va % k64K != 0 || first.size_bytes % k64K != 0) {
+            log_vmem_failed("bxvm", "unknown_xmem_region", E_INVALIDARG);
             return E_INVALIDARG;
         }
         const uint64_t span = in.size_bytes != 0 ? in.size_bytes : first.size_bytes;
         if (span < first.size_bytes || span % first.size_bytes != 0) {
+            log_vmem_failed("bxvm", "unaligned_region_span", E_INVALIDARG);
             return E_INVALIDARG;
         }
         for (uint64_t offset = 0; offset < span; offset += first.size_bytes) {
             bx_xmem_region_info_t page{};
             if (!bx_xmem_query_region(first.base_va + offset, &page) || page.base_va != first.base_va + offset ||
                 page.size_bytes != first.size_bytes) {
+                log_vmem_failed("bxvm", "discontiguous_xmem_region", E_INVALIDARG);
                 return E_INVALIDARG;
             }
         }
@@ -767,55 +852,165 @@ extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config) {
         have_region = true;
     }
 
+    if (!can_access_bytes(static_cast<char*>(config) + offsetof(BxD3d12VirtualMemoryConfig, cpu_pointer),
+                          sizeof(in.cpu_pointer), true)) {
+        log_vmem_fallback("bxvm", "unwritable_output");
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return S_OK;
+    }
+
     const uint64_t new_base = have_region ? region.base_va : in.base_va;
     const uint64_t new_size = have_region ? region.size_bytes : in.size_bytes;
     const bool backing_opt_in = (in.flags & BX_D3D12_VMEM_FLAG_BACKING_HEAP) != 0;
     BxChargedHeap* old_heap = nullptr;
     ID3D12Resource* old_buffer = nullptr;
     uint64_t published = 0;
+    bool output_written = false;
     {
         Guard guard(g_section);
         const bool same = g_record.configured && g_record.config_base == new_base && g_record.config_size == new_size;
-        if (!same) {
-            take_cached_heap_locked(&old_heap, &old_buffer);
+        published = same ? g_record.cpu_pointer : 0;
+        output_written = write_cpu_pointer(config, published);
+        if (output_written) {
+            if (!same) {
+                take_cached_heap_locked(&old_heap, &old_buffer);
+            }
+            if (!same || g_record.backing_opt_in != backing_opt_in || g_record.have_region != have_region) {
+                ++g_record.config_generation;
+            }
+            g_record.configured = true;
+            g_record.backing_opt_in = backing_opt_in;
+            g_record.profile = profile;
+            g_record.title_limit = cap;
+            g_record.have_region = have_region;
+            g_record.config_base = new_base;
+            g_record.config_size = new_size;
+            g_record.region = have_region ? region : bx_xmem_region_info_t{};
         }
-        if (!same || g_record.backing_opt_in != backing_opt_in || g_record.have_region != have_region) {
-            ++g_record.config_generation;
-        }
-        g_record.configured = true;
-        g_record.backing_opt_in = backing_opt_in;
-        g_record.profile = profile;
-        g_record.title_limit = cap;
-        g_record.have_region = have_region;
-        g_record.config_base = new_base;
-        g_record.config_size = new_size;
-        g_record.region = have_region ? region : bx_xmem_region_info_t{};
-        published = g_record.cpu_pointer;
     }
-    /* The only write to caller memory, and it happens before this call returns. */
-    write_cpu_pointer(config, published);
-    if (old_buffer) {
-        old_buffer->Unmap(0, nullptr);
-        old_buffer->Release();
+    if (!output_written) {
+        log_vmem_failed("bxvm", "unwritable_output", E_INVALIDARG);
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return E_INVALIDARG;
     }
-    if (old_heap) {
-        old_heap->Release();
-    }
+    release_backing_pair(old_heap, old_buffer);
     uint64_t charged = 0;
     {
         Guard guard(g_section);
         charged = g_record.charged_private_bytes;
     }
 
-    char detail[384];
+    char detail[416];
     std::snprintf(detail, sizeof(detail),
-                  "profile=%s title_limit=%llu xmem_used=%llu xmem_region=%d base=0x%llx region_bytes=%llu gpu_heap_bytes=%llu",
+                  /* cap_used is everything counted against the title cap, graphics heaps
+                   * included (xmem's stats include external charges); gpu_heap_bytes is the
+                   * graphics part of it, so the two must not be added. */
+                  "decoder=bxvm applied=1 profile=%s title_limit=%llu cap_used=%llu xmem_region=%d base=0x%llx region_bytes=%llu gpu_heap_bytes=%llu",
                   profile_name(profile), static_cast<unsigned long long>(cap),
                   static_cast<unsigned long long>(stats.committed_virtual_bytes + stats.allocated_physical_bytes),
                   have_region ? 1 : 0, static_cast<unsigned long long>(have_region ? region.base_va : 0),
                   static_cast<unsigned long long>(have_region ? region.size_bytes : 0),
                   static_cast<unsigned long long>(charged));
     bx_log_emit(BX_LOG_INFO, "d3d12_xs", "D3D12ConfigureVirtualMemoryX", detail);
+    return S_OK;
+}
+
+HRESULT decode_xbox_config(void* config) {
+    /* The structure has no size field, so all 32 bytes must be readable and writable. */
+    BxXboxVirtualMemoryConfig in{};
+    if (!copy_readable_bytes(config, &in, sizeof(in))) {
+        log_vmem_failed("xbox", "unreadable_config", E_INVALIDARG);
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return E_INVALIDARG;
+    }
+    if (in.page_table_memory_4mb_page_count == 0u) {
+        log_vmem_failed("xbox", "zero_page_table_pages", E_INVALIDARG);
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return E_INVALIDARG;
+    }
+    {
+        Guard guard(g_section);
+        if (g_record.device_created) {
+            log_vmem_failed("xbox", "device_already_created", E_FAIL);
+            BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+            return E_FAIL;
+        }
+    }
+
+    const bool clamped = in.page_table_memory_4mb_page_count > BX_D3D12_XBOX_PAGE_TABLE_MAX_4MB_PAGES;
+    const uint32_t pages = clamped ? BX_D3D12_XBOX_PAGE_TABLE_MAX_4MB_PAGES : in.page_table_memory_4mb_page_count;
+    uint32_t preserve = in.frame_buffer_preserve_memory_size_bytes;
+    if (preserve != BX_D3D12_XBOX_FRAME_BUFFER_PRESERVE_LEGACY &&
+        preserve > BX_D3D12_XBOX_FRAME_BUFFER_PRESERVE_MAX_BYTES) {
+        preserve = BX_D3D12_XBOX_FRAME_BUFFER_PRESERVE_MAX_BYTES;
+    }
+    const uint64_t outputs[2] = {BX_D3D12_XBOX_MIN_GRAPHICS_ADDRESS,
+                                 static_cast<uint64_t>(pages) * BX_D3D12_XBOX_GRAPHICS_BYTES_PER_4MB_PAGE};
+    if (!write_config_bytes(config, offsetof(BxXboxVirtualMemoryConfig, minimum_valid_graphics_address), outputs,
+                            sizeof(outputs))) {
+        log_vmem_failed("xbox", "unwritable_output", E_INVALIDARG);
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return E_INVALIDARG;
+    }
+
+    /*
+     * The host sizes no GPU page tables and keeps no cross-process frame buffer, so both
+     * values are only recorded. This path leaves the BXVM record and its cached backing heap
+     * untouched, reports applied=0 and keeps BX_STUB_LOG, so `bx-cli trace` still lists
+     * D3D12ConfigureVirtualMemoryX as unimplemented.
+     */
+    bool repeat = false;
+    {
+        Guard guard(g_section);
+        repeat = g_record.xbox_configured && g_record.xbox_page_table_4mb_pages == pages &&
+                 g_record.xbox_frame_buffer_preserve_bytes == preserve;
+        g_record.xbox_configured = true;
+        g_record.xbox_page_table_4mb_pages = pages;
+        g_record.xbox_frame_buffer_preserve_bytes = preserve;
+    }
+
+    char detail[320];
+    std::snprintf(detail, sizeof(detail),
+                  "decoder=xbox applied=0 recorded_only=1 page_table_4mb_pages=%u clamped=%d "
+                  "frame_buffer_preserve_bytes=%u min_gpu_va=0x%llx max_gpu_va=0x%llx max_estimated=%d "
+                  "repeat=%d reason=host_ignores_page_table_size",
+                  pages, clamped ? 1 : 0, preserve, static_cast<unsigned long long>(outputs[0]),
+                  static_cast<unsigned long long>(outputs[1]),
+                  pages == BX_D3D12_XBOX_PAGE_TABLE_DEFAULT_4MB_PAGES ? 0 : 1, repeat ? 1 : 0);
+    bx_log_emit(BX_LOG_WARN, "d3d12_xs", "vmem_config_recorded", detail);
+    BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+    return S_OK;
+}
+
+} // namespace
+
+extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config) {
+    if (!config) {
+        /* Titles call this before reserving memory and require S_OK. */
+        log_vmem_fallback("none", "null_config");
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return S_OK;
+    }
+    /*
+     * PVOID has no size. Verify 8 bytes are committed and readable before
+     * probing the header, and let each decoder verify its own full length.
+     */
+    ConfigHeader header{};
+    if (!copy_readable_bytes(config, &header, sizeof(header))) {
+        log_vmem_fallback("none", "unreadable_header");
+        BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
+        return S_OK;
+    }
+
+    if (header.magic == BX_D3D12_VMEM_MAGIC && header.struct_size == sizeof(BxD3d12VirtualMemoryConfig)) {
+        return decode_bxvm_config(config);
+    }
+    if (header.magic == 0u) {
+        return decode_xbox_config(config);
+    }
+
+    log_vmem_fallback("none", "unrecognized_header");
+    BX_STUB_LOG("d3d12_xs.dll", "D3D12ConfigureVirtualMemoryX");
     return S_OK;
 }
 
@@ -856,6 +1051,7 @@ bool bx_vmem_install_device_hooks(void* device) {
     static bool installed = false;
     Guard guard(g_section);
     if (installed) {
+        g_record.device_created = true;
         return true;
     }
     auto* proxy = static_cast<BxDeviceProxy*>(device);
@@ -871,6 +1067,7 @@ bool bx_vmem_install_device_hooks(void* device) {
     DWORD ignored = 0;
     VirtualProtect(vtable + 28, sizeof(void*) * 2, old, &ignored);
     installed = true;
+    g_record.device_created = true;
     bx_log_emit(BX_LOG_INFO, "d3d12_xs", "vmem_hook", "CreateHeap and CreatePlacedResource installed");
     return true;
 }

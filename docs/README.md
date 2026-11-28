@@ -31,6 +31,6 @@
 
 - [Engineering & Agent Rules](../AGENTS.md) (`CLAUDE.md` symlink) — Mandatory rules for human contributors and coding agents.
 - [Contributing Guidelines](../CONTRIBUTING.md) — Claiming, verification, clean-room policy, and DCO sign-off.
-- [Claims & Evidence Classes](claims.toml) — Evidence classification definitions (classes A–D, U).
+- [Claims & Evidence Classes](claims.toml) — Scoped claims with an evidence-class legend (A, B, D, E, U); classes describe evidence type, not Xbox hardware verification.
 - [Legal Scope](legal.md), [Dependency Licensing](licenses.md), and [Third-Party Notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution boundaries.
 - [Threat Model](threat-model.md) & [Security Policy](../SECURITY.md) — Isolation boundaries and vulnerability reporting.

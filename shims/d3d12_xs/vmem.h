@@ -9,17 +9,20 @@
  * BetterXen-defined parameter block for D3D12ConfigureVirtualMemoryX.
  *
  * The export is PVOID and the frozen ABI has no size argument (abi/ is out of
- * scope). The first 8 bytes are therefore the minimum dereference: magic then
- * the struct size. Magic is 'BXVM' (0x4D565842). struct_size must equal
- * sizeof(BxD3d12VirtualMemoryConfig). Any other pointer, including null, is not
- * this struct: the call logs the unimplemented-API stub and returns S_OK. It
- * does not read past those 8 bytes and it does not write.
+ * scope). The first 8 bytes are therefore the initial probe: a magic word and
+ * the following 32-bit value. Magic is 'BXVM' (0x4D565842); a matching header
+ * and struct size select the full BetterXen block. A zero first word selects
+ * the Xbox decoder, which checks the full block and may write its two address
+ * outputs. Other headers (including unrecognized nonzero Xbox flags) fall
+ * back with S_OK and no writes. A null pointer is not read.
  *
  * A block whose magic and size match is then checked in full. version is 1.
  * flags may be 0 or BX_D3D12_VMEM_FLAG_BACKING_HEAP. Any other flag bit, or a
  * non-zero reserved word, is not this struct either (logged S_OK, no write).
  * A recognised block with a bad size or a base_va that bx_xmem_query_region
- * does not resolve still returns E_INVALIDARG and is not written.
+ * does not resolve returns E_INVALIDARG even if its output is read-only. Valid
+ * inputs with an initially unwritable output fall back with S_OK and a stub
+ * log. A failed write after the accessibility check returns E_INVALIDARG.
  *
  * base_va is 0, or an address bx_xmem_query_region resolves. It is not a GPU pointer.
  * size_bytes is 0 or a 64 KiB multiple that does not exceed the active title limit.
@@ -86,6 +89,51 @@ static_assert(offsetof(BxD3d12VirtualMemoryConfig, base_va) == 16, "base_va offs
 static_assert(offsetof(BxD3d12VirtualMemoryConfig, size_bytes) == 24, "size_bytes offset");
 static_assert(offsetof(BxD3d12VirtualMemoryConfig, reserved) == 32, "reserved offset");
 static_assert(offsetof(BxD3d12VirtualMemoryConfig, cpu_pointer) == 40, "cpu_pointer offset");
+
+/*
+ * The Xbox virtual-memory configuration (D3D12XBOX_VIRTUAL_MEMORY_CONFIGURATION, d3d12_xs.h).
+ *
+ * Source: the authorized GDK documentation of D3D12ConfigureVirtualMemoryX and the
+ * structure. Call-site observation of a project-authorized target build agrees with it: a
+ * zero-initialized block with 3 or 4 in the page-table field and no flags.
+ *
+ * Documented: flags must be none (0); the GPU page table is sized in 4 MB units, at least 1
+ * and clamped to 33 (default 5, 20 MB); the frame-buffer preserve size is 0 (none), -1 (the
+ * legacy size, about 10 MB) or a byte count clamped to 64 MB; the two addresses are outputs,
+ * the minimum always 2 GB; and the call fails with E_FAIL once a D3D12 device exists.
+ *
+ * The host does not size GPU page tables or keep a cross-process frame buffer, so the
+ * decoder records both, writes the outputs and still logs BX_STUB_LOG. The maximum address
+ * is documented only for the default size; for other sizes it is scaled linearly from that
+ * value, an inference the log marks as max_estimated=1. A page count of 0 is refused: the
+ * value of the header's DEFAULT constant is not documented.
+ */
+struct BxXboxVirtualMemoryConfig {
+    uint32_t flags;
+    uint32_t page_table_memory_4mb_page_count;
+    uint32_t frame_buffer_preserve_memory_size_bytes;
+    uint32_t padding;
+    uint64_t minimum_valid_graphics_address;
+    uint64_t maximum_valid_graphics_address;
+};
+static_assert(sizeof(BxXboxVirtualMemoryConfig) == 32, "Xbox config block is 32 bytes");
+static_assert(offsetof(BxXboxVirtualMemoryConfig, flags) == 0, "flags offset");
+static_assert(offsetof(BxXboxVirtualMemoryConfig, page_table_memory_4mb_page_count) == 4,
+              "page_table_memory_4mb_page_count offset");
+static_assert(offsetof(BxXboxVirtualMemoryConfig, frame_buffer_preserve_memory_size_bytes) == 8,
+              "frame_buffer_preserve_memory_size_bytes offset");
+static_assert(offsetof(BxXboxVirtualMemoryConfig, minimum_valid_graphics_address) == 16,
+              "minimum_valid_graphics_address offset");
+static_assert(offsetof(BxXboxVirtualMemoryConfig, maximum_valid_graphics_address) == 24,
+              "maximum_valid_graphics_address offset");
+
+constexpr uint32_t BX_D3D12_XBOX_PAGE_TABLE_DEFAULT_4MB_PAGES = 5u;
+constexpr uint32_t BX_D3D12_XBOX_PAGE_TABLE_MAX_4MB_PAGES = 33u;
+constexpr uint32_t BX_D3D12_XBOX_FRAME_BUFFER_PRESERVE_LEGACY = 0xFFFFFFFFu;
+constexpr uint32_t BX_D3D12_XBOX_FRAME_BUFFER_PRESERVE_MAX_BYTES = 64u * 1024u * 1024u;
+constexpr uint64_t BX_D3D12_XBOX_MIN_GRAPHICS_ADDRESS = 2ull * 1024ull * 1024ull * 1024ull;
+/* 159.375 GiB at the default 5 pages (20 MB), so 31.875 GiB per 4 MB page. */
+constexpr uint64_t BX_D3D12_XBOX_GRAPHICS_BYTES_PER_4MB_PAGE = 0x7F8000000ull;
 
 extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config);
 

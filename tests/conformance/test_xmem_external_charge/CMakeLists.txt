@@ -1,0 +1,3 @@
+add_executable(test_xmem_external_charge main.cpp)
+target_include_directories(test_xmem_external_charge PRIVATE "${BX_ABI_INCLUDE_DIR}")
+target_link_libraries(test_xmem_external_charge PRIVATE xmem bx_runtime_veh kernel32)
