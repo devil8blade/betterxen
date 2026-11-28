@@ -2,6 +2,10 @@
 #ifndef BETTERXEN_D3D12_XS_PROXY_GENERATED_H
 #define BETTERXEN_D3D12_XS_PROXY_GENERATED_H
 
+/* HANDOFF targets: the host interface, then the caller's arguments unmodified. */
+HRESULT bx_vmem_create_placed_resource1(ID3D12Device8* host, ID3D12Heap * a0, UINT64 a1, const D3D12_RESOURCE_DESC1 * a2, D3D12_RESOURCE_STATES a3, const D3D12_CLEAR_VALUE * a4, REFIID a5, void ** a6);
+HRESULT bx_vmem_create_placed_resource2(ID3D12Device10* host, ID3D12Heap * a0, UINT64 a1, const D3D12_RESOURCE_DESC1 * a2, D3D12_BARRIER_LAYOUT a3, const D3D12_CLEAR_VALUE * a4, UINT32 a5, DXGI_FORMAT * a6, REFIID a7, void ** a8);
+
 class BxDeviceProxyGen : public ID3D12Device10 {
 public:
     static constexpr const char* kLeafName = "ID3D12Device10";
