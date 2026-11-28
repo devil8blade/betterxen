@@ -35,11 +35,11 @@
 extern "C" {
 __declspec(dllimport) HRESULT WINAPI D3D12XboxCreateDevice(void* params, REFIID riid, void** ppv);
 __declspec(dllimport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* config);
-__declspec(dllimport) PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, DWORD protect);
-__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T* page_count, PULONG_PTR pages, uint64_t flags);
-__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(SIZE_T* page_count, PULONG_PTR pages, uint64_t flags);
-__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID address, SIZE_T page_count, uint64_t flags,
-                                                        PULONG_PTR pages);
+__declspec(dllimport) PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, uint64_t xmem_flags,
+                                                     DWORD protect);
+__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(uint64_t flags, PULONG_PTR page_count, PULONG_PTR pages);
+__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR page_count, PULONG_PTR pages);
+__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID address, ULONG_PTR page_count, PULONG_PTR pages);
 }
 
 namespace {
@@ -324,7 +324,7 @@ int main() {
      * 4. Verify XMemVirtualAlloc reservation works after Xbox configuration
      *    (matching the caller's MEM_RESERVE + console high-bit pattern).
      */
-    PVOID reserved_va = XMemVirtualAlloc(nullptr, 2ull * 1024ull * 1024ull, 0x20402000u, 0x21u);
+    PVOID reserved_va = XMemVirtualAlloc(nullptr, 2ull * 1024ull * 1024ull, 0x20402000u, 0x21u, PAGE_READWRITE);
     check(reserved_va != nullptr, "XMemVirtualAlloc reservation after Xbox config must succeed");
     if (reserved_va) {
         check(VirtualFree(reserved_va, 0, MEM_RELEASE) != 0, "release the XMemVirtualAlloc reservation");
@@ -342,9 +342,9 @@ int main() {
 
     SIZE_T page_count = 2;
     ULONG_PTR pages[2] = {};
-    const BOOL phys_ok = XMemAllocatePhysicalPages(&page_count, pages, 0);
+    const BOOL phys_ok = XMemAllocatePhysicalPages(0, &page_count, pages);
     check(phys_ok && page_count == 2, "XMemAllocatePhysicalPages(2) must succeed");
-    uint8_t* mapped_region = phys_ok ? static_cast<uint8_t*>(XMemMapPhysicalPages(nullptr, 2, 0, pages)) : nullptr;
+    uint8_t* mapped_region = phys_ok ? static_cast<uint8_t*>(XMemMapPhysicalPages(nullptr, 2, pages)) : nullptr;
     check(mapped_region != nullptr, "XMemMapPhysicalPages(2) must succeed");
 
     if (device && mapped_region) {
@@ -423,11 +423,10 @@ int main() {
     }
 
     if (mapped_region) {
-        XMemMapPhysicalPages(mapped_region, 2, 0, nullptr);
+        XMemMapPhysicalPages(mapped_region, 2, nullptr);
     }
     if (phys_ok) {
-        SIZE_T free_count = 2;
-        XMemFreePhysicalPages(&free_count, pages, 0);
+        XMemFreePhysicalPages(2, pages);
     }
     if (device) {
         device->Release();

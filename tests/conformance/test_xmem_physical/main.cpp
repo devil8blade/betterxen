@@ -1,3 +1,11 @@
+/*
+ * Physical pages in xmem.dll, against the signatures and rules of the authorized GDK
+ * documentation: XMemAllocatePhysicalPages(XMemFlags, NumberOfPages, PageArray) in 64 KB pages,
+ * XMemFreePhysicalPages(NumberOfPages, PageArray), XMemMapPhysicalPages(VirtualAddress,
+ * NumberOfPages, PageArray) and XMemMapPhysicalPagesScatter(VirtualAddressArray, NumberOfPages,
+ * PageArray), mapping into XMemVirtualAlloc(MEM_RESERVE | MEM_64K_PAGES, XMEM_MAPPABLE)
+ * reservations. The constants below are written out from that documentation.
+ */
 #include <windows.h>
 
 #include <cstdint>
@@ -8,12 +16,23 @@
 extern "C" {
 PVOID WINAPI XMemAllocDefault(SIZE_T, uint64_t);
 VOID WINAPI XMemFreeDefault(PVOID, uint64_t);
-BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T*, PULONG_PTR, uint64_t);
-BOOL WINAPI XMemFreePhysicalPages(SIZE_T*, PULONG_PTR, uint64_t);
-PVOID WINAPI XMemMapPhysicalPages(PVOID, SIZE_T, uint64_t, PULONG_PTR);
-PVOID WINAPI XMemMapPhysicalPagesScatter(PVOID, SIZE_T, uint64_t, PULONG_PTR);
+PVOID WINAPI XMemVirtualAlloc(PVOID, SIZE_T, DWORD, uint64_t, DWORD);
+BOOL WINAPI XMemAllocatePhysicalPages(uint64_t, PULONG_PTR, PULONG_PTR);
+BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR, PULONG_PTR);
+PVOID WINAPI XMemMapPhysicalPages(PVOID, ULONG_PTR, PULONG_PTR);
+BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID*, ULONG_PTR, PULONG_PTR);
 BOOL WINAPI XMemGetWorkingSetStatistics(PVOID, SIZE_T);
 }
+
+namespace {
+
+constexpr SIZE_T kPage = 64 * 1024;
+constexpr DWORD kMem64KPages = 0x20400000;
+constexpr DWORD kMem2MBPages = 0x20000000;
+constexpr uint64_t kXMemCpu = 0x1;
+constexpr uint64_t kXMemMappable = 0x20;
+constexpr uint64_t kXMem2MBClusters = 0x20000000;
+constexpr uint64_t kXMemGpuOptimalBandwidthRequired = 0x280;
 
 #define CHECK(condition)                                                        \
     do {                                                                        \
@@ -24,124 +43,137 @@ BOOL WINAPI XMemGetWorkingSetStatistics(PVOID, SIZE_T);
         }                                                                       \
     } while (false)
 
-bool check_aliases(SIZE_T page_size, uint64_t flags) {
+DWORD state_of(const void* address) {
+    MEMORY_BASIC_INFORMATION region{};
+    return VirtualQuery(address, &region, sizeof(region)) ? region.State : 0;
+}
+
+bool check_physical_pages() {
     bx_xmem_stats_t stats{};
     CHECK(XMemGetWorkingSetStatistics(&stats, sizeof(stats)));
     CHECK(stats.allocated_physical_bytes == 0);
 
-    SIZE_T count = 2;
-    ULONG_PTR pages[2]{};
-    // Invalid flags must be rejected cleanly before touching stats or tags.
-    CHECK(!XMemAllocatePhysicalPages(&count, pages, 0x12345));
-    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    // Flags outside 2 MB clusters and the bandwidth values are refused before anything changes.
+    ULONG_PTR count = 4;
+    ULONG_PTR pages[4]{};
+    CHECK(!XMemAllocatePhysicalPages(0x12345, &count, pages));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER && count == 4 && !pages[0]);
+    CHECK(!XMemAllocatePhysicalPages(kXMem2MBClusters, &count, pages));
+    CHECK(GetLastError() == ERROR_NOT_SUPPORTED && !pages[0]);
 
-    CHECK(XMemAllocatePhysicalPages(&count, pages, flags));
-    CHECK(count == 2 && pages[0] && pages[1] && pages[0] != pages[1]);
-
-    // Working-set statistics and internal stats must both reflect physical pages.
+    // A bandwidth value is accepted; pages are 64 KB and counted against the title budget.
+    CHECK(XMemAllocatePhysicalPages(kXMemGpuOptimalBandwidthRequired, &count, pages));
+    CHECK(count == 4 && pages[0] && pages[1] && pages[2] && pages[3]);
+    CHECK(pages[0] != pages[1] && pages[1] != pages[2] && pages[2] != pages[3]);
     bx_xmem_get_internal_stats(&stats);
-    CHECK(stats.allocated_physical_bytes == count * page_size);
-    CHECK(stats.peak_committed_bytes >= count * page_size);
+    CHECK(stats.allocated_physical_bytes == 4 * kPage);
     bx_xmem_stats_t ws_stats{};
     CHECK(XMemGetWorkingSetStatistics(&ws_stats, sizeof(ws_stats)));
-    CHECK(ws_stats.allocated_physical_bytes == count * page_size);
+    CHECK(ws_stats.allocated_physical_bytes == 4 * kPage);
 
-    // Shared title budget cap: existing physical pages must block both full-cap
-    // physical and full-cap heap allocations without allocating gigabytes.
-    SIZE_T cap_pages = static_cast<SIZE_T>(stats.title_limit_bytes / page_size);
-    CHECK(!XMemAllocatePhysicalPages(&cap_pages, pages, flags));
+    ULONG_PTR cap_pages = static_cast<ULONG_PTR>(stats.title_limit_bytes / kPage);
+    CHECK(!XMemAllocatePhysicalPages(0, &cap_pages, pages));
     CHECK(GetLastError() == ERROR_NOT_ENOUGH_MEMORY);
     CHECK(!XMemAllocDefault(static_cast<SIZE_T>(stats.title_limit_bytes), 0));
     CHECK(GetLastError() == ERROR_NOT_ENOUGH_MEMORY);
-    bx_xmem_get_internal_stats(&stats);
-    CHECK(stats.allocated_physical_bytes == count * page_size);
 
-    CHECK(!XMemMapPhysicalPages(nullptr, count, 0x12345, pages));
+    // A mappable reservation stays reserved, uncommitted, until pages are mapped into it.
+    auto* base = static_cast<BYTE*>(XMemVirtualAlloc(nullptr, 8 * kPage, MEM_RESERVE | kMem64KPages,
+                                                     kXMemMappable | kXMemCpu, PAGE_READWRITE));
+    CHECK(base && reinterpret_cast<uintptr_t>(base) % kPage == 0);
+    CHECK(state_of(base) == MEM_RESERVE && state_of(base + 7 * kPage) == MEM_RESERVE);
+    CHECK(!XMemVirtualAlloc(nullptr, kPage, MEM_RESERVE | MEM_COMMIT | kMem64KPages, kXMemMappable,
+                            PAGE_READWRITE));
     CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
 
-    auto* linear = static_cast<BYTE*>(XMemMapPhysicalPages(nullptr, count, flags, pages));
-    CHECK(linear && reinterpret_cast<uintptr_t>(linear) % page_size == 0);
-    ULONG_PTR reversed[] = {pages[1], pages[0]};
-    auto* scatter = static_cast<BYTE*>(
-        XMemMapPhysicalPagesScatter(nullptr, count, flags, reversed));
-    CHECK(scatter && scatter != linear && reinterpret_cast<uintptr_t>(scatter) % page_size == 0);
+    // Map four pages, then alias them in reverse order in the next four slots.
+    CHECK(XMemMapPhysicalPages(base, 4, pages) == base);
+    for (int i = 0; i < 4; ++i) base[i * kPage + 9] = static_cast<BYTE>(0x40 + i);
+    ULONG_PTR reversed[] = {pages[3], pages[2], pages[1], pages[0]};
+    CHECK(XMemMapPhysicalPages(base + 4 * kPage, 4, reversed) == base + 4 * kPage);
+    CHECK(base[4 * kPage + 9] == 0x43 && base[7 * kPage + 9] == 0x40);
+    base[5 * kPage + 1] = 0x7e;
+    CHECK(base[2 * kPage + 1] == 0x7e);
 
-    linear[7] = 0x41;
-    linear[page_size + 7] = 0x73;
-    CHECK(scatter[7] == 0x73 && scatter[page_size + 7] == 0x41);
-    scatter[page_size + 30] = 0xf2;
-    CHECK(linear[30] == 0xf2);
+    bx_xmem_region_info_t info{};
+    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(base + 4 * kPage + 3), &info));
+    CHECK(info.base_va == reinterpret_cast<uintptr_t>(base + 4 * kPage) && info.physical_tag == pages[3]);
+    CHECK(info.size_bytes == kPage && info.protect_flags == PAGE_READWRITE && info.mem_type_flags == MEM_MAPPED);
 
-    // Duplicate tags are valid when mapping (intra-span ring-buffer/tile aliasing).
-    ULONG_PTR dup_map[] = {pages[0], pages[0]};
-    auto* dup_view = static_cast<BYTE*>(
-        XMemMapPhysicalPagesScatter(nullptr, count, flags, dup_map));
-    CHECK(dup_view && reinterpret_cast<uintptr_t>(dup_view) % page_size == 0);
-    dup_view[13] = 0x9b;
-    CHECK(dup_view[page_size + 13] == 0x9b && linear[13] == 0x9b);
-    bx_xmem_region_info_t dup0{};
-    bx_xmem_region_info_t dup1{};
-    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(dup_view), &dup0));
-    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(dup_view + page_size), &dup1));
-    CHECK(dup0.physical_tag == pages[0] && dup1.physical_tag == pages[0]);
-    CHECK(XMemMapPhysicalPagesScatter(dup_view, count, flags, nullptr) == dup_view);
-    CHECK(!bx_xmem_query_region(reinterpret_cast<uintptr_t>(dup_view), &dup0));
+    // Mapping over mapped pages replaces them.
+    CHECK(XMemMapPhysicalPages(base, 4, reversed) == base);
+    CHECK(base[9] == 0x43 && base[3 * kPage + 9] == 0x40);
 
-    bx_xmem_region_info_t first{};
-    bx_xmem_region_info_t alias{};
-    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(linear + 7), &first));
-    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(scatter + page_size + 7), &alias));
-    CHECK(first.base_va == reinterpret_cast<uintptr_t>(linear));
-    CHECK(alias.base_va == reinterpret_cast<uintptr_t>(scatter + page_size));
-    CHECK(alias.physical_tag == first.physical_tag && first.physical_tag == pages[0]);
-    CHECK(first.size_bytes == page_size && alias.page_size_bytes == page_size);
-    CHECK(first.protect_flags == PAGE_READWRITE && first.mem_type_flags == MEM_MAPPED);
+    // A NULL page array unmaps; the range stays reserved and can be mapped again.
+    CHECK(XMemMapPhysicalPages(base, 4, nullptr) == base);
+    CHECK(state_of(base) == MEM_RESERVE && !bx_xmem_query_region(reinterpret_cast<uintptr_t>(base), &info));
+    CHECK(base[4 * kPage + 9] == 0x43);
+    CHECK(XMemMapPhysicalPages(base, 4, pages) == base);
+    CHECK(base[9] == 0x40);
 
-    // Rejected frees (stale or duplicate tags) must fail without modifying
-    // page_array or disturbing live mappings.
+    // Mapping outside a mappable reservation is refused.
+    void* plain = VirtualAlloc(nullptr, kPage, MEM_RESERVE, PAGE_NOACCESS);
+    CHECK(plain && !XMemMapPhysicalPages(plain, 1, pages));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    VirtualFree(plain, 0, MEM_RELEASE);
+
+    // Scatter: parallel arrays of slots and tags; a 0 tag unmaps its slot.
+    PVOID slots[] = {base + 7 * kPage, base + 6 * kPage};
+    ULONG_PTR scatter_pages[] = {pages[0], 0};
+    CHECK(XMemMapPhysicalPagesScatter(slots, 2, scatter_pages));
+    CHECK(base[7 * kPage + 9] == 0x40 && state_of(base + 6 * kPage) == MEM_RESERVE);
+    // One bad slot refuses the whole call before anything changes.
+    PVOID bad_slots[] = {base + 6 * kPage, base + 1};
+    ULONG_PTR bad_pages[] = {pages[1], pages[2]};
+    CHECK(!XMemMapPhysicalPagesScatter(bad_slots, 2, bad_pages));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER && state_of(base + 6 * kPage) == MEM_RESERVE);
+    CHECK(!XMemMapPhysicalPagesScatter(nullptr, 1, bad_pages));
+    CHECK(XMemMapPhysicalPagesScatter(slots, 2, nullptr));
+    CHECK(state_of(base + 7 * kPage) == MEM_RESERVE);
+
+    // Frees with stale or duplicate tags fail without changing the array or live mappings.
     ULONG_PTR stale[] = {pages[0], 0};
-    CHECK(!XMemFreePhysicalPages(&count, stale, flags));
+    CHECK(!XMemFreePhysicalPages(2, stale));
     CHECK(GetLastError() == ERROR_INVALID_PARAMETER && stale[0] == pages[0] && stale[1] == 0);
-    CHECK(linear[7] == 0x41);
     ULONG_PTR dup_free[] = {pages[0], pages[0]};
-    CHECK(!XMemFreePhysicalPages(&count, dup_free, flags));
-    CHECK(GetLastError() == ERROR_INVALID_PARAMETER
-          && dup_free[0] == pages[0] && dup_free[1] == pages[0]);
-    CHECK(linear[7] == 0x41 && scatter[7] == 0x73);
+    CHECK(!XMemFreePhysicalPages(2, dup_free));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER && base[9] == 0x40);
 
-    CHECK(!XMemMapPhysicalPagesScatter(nullptr, count, flags, stale));
+    // Freeing unmaps every view of the pages and leaves the reservation reserved.
+    CHECK(XMemFreePhysicalPages(4, pages));
+    CHECK(!pages[0] && !pages[3]);
+    CHECK(state_of(base) == MEM_RESERVE && state_of(base + 4 * kPage) == MEM_RESERVE);
+    CHECK(!XMemMapPhysicalPages(base, 4, reversed));
     CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
-    CHECK(!XMemMapPhysicalPages(linear, count, flags, pages));
-    CHECK(linear[7] == 0x41 && scatter[7] == 0x73);
-
-    // Partial/over-wide unmap must fail cleanly and leave mapped pages intact.
-    CHECK(!XMemMapPhysicalPagesScatter(scatter, count + 1, flags, nullptr));
-    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
-    CHECK(bx_xmem_query_region(reinterpret_cast<uintptr_t>(scatter), &alias));
-    CHECK(scatter[7] == 0x73 && scatter[page_size + 7] == 0x41);
-
-    // Exact unmap succeeds; repeating unmap on the now-empty span must fail.
-    CHECK(XMemMapPhysicalPagesScatter(scatter, count, flags, nullptr) == scatter);
-    CHECK(!bx_xmem_query_region(reinterpret_cast<uintptr_t>(scatter), &alias));
-    CHECK(!XMemMapPhysicalPagesScatter(scatter, count, flags, nullptr));
-    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
-
-    CHECK(XMemMapPhysicalPagesScatter(scatter, count, flags, reversed) == scatter);
-    CHECK(scatter[7] == 0x73 && scatter[page_size + 7] == 0x41);
-    CHECK(XMemFreePhysicalPages(&count, pages, flags));
-    CHECK(!pages[0] && !pages[1]);
-    CHECK(!bx_xmem_query_region(reinterpret_cast<uintptr_t>(linear), &first));
-    CHECK(!bx_xmem_query_region(reinterpret_cast<uintptr_t>(scatter), &alias));
-    CHECK(!XMemMapPhysicalPages(nullptr, count, flags, reversed));
-    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
-
     bx_xmem_get_internal_stats(&stats);
     CHECK(stats.allocated_physical_bytes == 0);
+    CHECK(VirtualFree(base, 0, MEM_RELEASE));
+
+    // 2 MB-page reservations exist, but mapping into them is not implemented.
+    ULONG_PTR one = 1;
+    ULONG_PTR page[1]{};
+    CHECK(XMemAllocatePhysicalPages(0, &one, page));
+    auto* large = XMemVirtualAlloc(nullptr, 2 * 1024 * 1024, MEM_RESERVE | kMem2MBPages, kXMemMappable,
+                                   PAGE_READWRITE);
+    CHECK(large && reinterpret_cast<uintptr_t>(large) % (2 * 1024 * 1024) == 0);
+    CHECK(!XMemMapPhysicalPages(large, 1, page));
+    CHECK(GetLastError() == ERROR_NOT_SUPPORTED);
+    VirtualFree(large, 0, MEM_RELEASE);
+
+    // BetterXen extension: a NULL address picks a span; unmapping it frees it.
+    auto* picked = static_cast<BYTE*>(XMemMapPhysicalPages(nullptr, 1, page));
+    CHECK(picked && reinterpret_cast<uintptr_t>(picked) % kPage == 0);
+    picked[0] = 0x5a;
+    CHECK(XMemMapPhysicalPages(picked, 1, nullptr) == picked);
+    CHECK(state_of(picked) == MEM_FREE);
+    CHECK(XMemFreePhysicalPages(1, page));
     return true;
 }
 
+} // namespace
+
 int main() {
-    if (!check_aliases(64 * 1024, 0) || !check_aliases(2 * 1024 * 1024, 2 * 1024 * 1024)) {
+    if (!check_physical_pages()) {
         return 1;
     }
     std::puts("test_xmem_physical: passed");

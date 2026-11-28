@@ -12,12 +12,15 @@ PVOID WINAPI XMemAlloc(SIZE_T, uint64_t);
 PVOID WINAPI XMemAllocDefault(SIZE_T, uint64_t);
 VOID WINAPI XMemFree(PVOID, uint64_t);
 VOID WINAPI XMemFreeDefault(PVOID, uint64_t);
-PVOID WINAPI XMemVirtualAlloc(PVOID, SIZE_T, DWORD, DWORD);
+PVOID WINAPI XMemVirtualAlloc(PVOID, SIZE_T, DWORD, uint64_t, DWORD);
 SIZE_T WINAPI XMemVirtualQuery(LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T);
 BOOL WINAPI XMemTransferMemory(PVOID, LPCVOID, SIZE_T, uint64_t);
 BOOL WINAPI XMemGetWorkingSetStatistics(PVOID, SIZE_T);
 BOOL WINAPI XMemIsToolsMemAvailable();
 }
+
+/* XMEM_CPU from the authorized GDK documentation of XMemVirtualAlloc. */
+constexpr uint64_t kXMemCpu = 0x1;
 
 #define CHECK(condition)                                                        \
     do {                                                                        \
@@ -68,17 +71,17 @@ int main() {
     CHECK(!XMemAllocDefault(stats.title_limit_bytes, 0));
     CHECK(GetLastError() == ERROR_NOT_ENOUGH_MEMORY);
     CHECK(!XMemVirtualAlloc(nullptr, stats.title_limit_bytes,
-                            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+                            MEM_COMMIT | MEM_RESERVE, kXMemCpu, PAGE_READWRITE));
     CHECK(GetLastError() == ERROR_NOT_ENOUGH_MEMORY);
 
     XMemFreeDefault(empty, 0);
     XMemFree(ordinary, 0);
 
     auto* reserved = static_cast<unsigned char*>(
-        XMemVirtualAlloc(nullptr, page * 3, MEM_RESERVE, PAGE_READWRITE));
+        XMemVirtualAlloc(nullptr, page * 3, MEM_RESERVE, kXMemCpu, PAGE_READWRITE));
     CHECK(reserved && reinterpret_cast<uintptr_t>(reserved) % page == 0);
-    CHECK(XMemVirtualAlloc(reserved, page * 2, MEM_COMMIT, PAGE_READWRITE) == reserved);
-    CHECK(XMemVirtualAlloc(reserved + page + 1, page * 2 - 1, MEM_COMMIT, PAGE_READWRITE)
+    CHECK(XMemVirtualAlloc(reserved, page * 2, MEM_COMMIT, kXMemCpu, PAGE_READWRITE) == reserved);
+    CHECK(XMemVirtualAlloc(reserved + page + 1, page * 2 - 1, MEM_COMMIT, kXMemCpu, PAGE_READWRITE)
           == reserved + page);
 
     MEMORY_BASIC_INFORMATION region{};
@@ -100,11 +103,15 @@ int main() {
     bx_xmem_get_internal_stats(&stats);
     CHECK(stats.committed_virtual_bytes == 0 && stats.peak_committed_bytes == page * 3);
 
-    // Console callers pass multi-bit attributes (e.g. 0x21) in arg 4 and high bits in alloc_type.
+    // Documented form: XMem flags in argument 4, page protection in argument 5, and a page-size
+    // bit (MEM_64K_PAGES, 0x20400000) in the allocation type.
     auto* console_res = static_cast<unsigned char*>(
-        XMemVirtualAlloc(nullptr, page * 2, MEM_RESERVE | 0x20400000u, 0x21u));
+        XMemVirtualAlloc(nullptr, page * 2, MEM_RESERVE | 0x20400000u, kXMemCpu, PAGE_READWRITE));
     CHECK(console_res != nullptr);
-    CHECK(XMemVirtualAlloc(console_res, page, MEM_COMMIT, 0x21u) == console_res);
+    CHECK(XMemVirtualAlloc(console_res, page, MEM_COMMIT, kXMemCpu, PAGE_READWRITE) == console_res);
+    MEMORY_BASIC_INFORMATION console_region{};
+    CHECK(VirtualQuery(console_res, &console_region, sizeof(console_region)));
+    CHECK(console_region.Protect == PAGE_READWRITE);
     console_res[0] = 0x5Au;
     CHECK(console_res[0] == 0x5Au);
     CHECK(VirtualFree(console_res, 0, MEM_RELEASE));

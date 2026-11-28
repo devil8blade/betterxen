@@ -10,7 +10,6 @@
 
 namespace {
 constexpr SIZE_T small_page = 64 * 1024;
-constexpr SIZE_T large_page = 2 * 1024 * 1024;
 
 struct PageBlock;
 
@@ -33,12 +32,30 @@ struct View {
     Page* page;
     BYTE* address;
     View* next;
+    // Mapped into an XMEM_MAPPABLE reservation: unmapping restores the placeholder so the
+    // range stays reserved and can be mapped again.
+    bool preserve;
+};
+
+// An XMemVirtualAlloc(MEM_RESERVE, XMEM_MAPPABLE) range, held as a placeholder.
+struct Reservation {
+    uintptr_t begin;
+    uintptr_t end;
+    SIZE_T page;
+    DWORD protect;
+    Reservation* next;
 };
 
 SRWLOCK memory_lock = SRWLOCK_INIT;
 PageBlock* blocks = nullptr;
 View* views = nullptr;
+Reservation* reservations = nullptr;
 ULONG_PTR next_tag = 1;
+
+// XMemAllocatePhysicalPages flags (authorized GDK documentation): 2 MB clusters, and the four
+// memory-bandwidth values, which only the Series X Advanced memory mode uses.
+constexpr uint64_t xmem_2mb_clusters = 0x20000000;
+constexpr uint64_t xmem_bandwidth_bits = 0x380;
 
 struct Lock {
     Lock() { AcquireSRWLockExclusive(&memory_lock); }
@@ -49,11 +66,13 @@ using ReservePlaceholder = PVOID (WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG,
                                            MEM_EXTENDED_PARAMETER*, ULONG);
 using ReplacePlaceholder = PVOID (WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG,
                                            ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
+using UnmapPreserving = BOOL (WINAPI*)(HANDLE, PVOID, ULONG);
 
 struct PlaceholderApi {
     HMODULE kernel = GetModuleHandleW(L"kernelbase.dll");
     ReservePlaceholder reserve = resolve<ReservePlaceholder>("VirtualAlloc2");
     ReplacePlaceholder replace = resolve<ReplacePlaceholder>("MapViewOfFile3");
+    UnmapPreserving unmap = resolve<UnmapPreserving>("UnmapViewOfFile2");
 
     template<class Function>
     Function resolve(const char* name) const {
@@ -61,15 +80,17 @@ struct PlaceholderApi {
     }
 };
 
-// The public backlog defines the supported sizes. The flags accepted here
-// belong to BetterXen's synthetic fixtures, pending a public console flags ABI.
-SIZE_T page_size(uint64_t flags) {
-    switch (flags) {
-        case 0:
-        case small_page: return small_page;
-        case large_page: return large_page;
-        default: return 0;
+const PlaceholderApi& placeholder_api() {
+    static const PlaceholderApi api;
+    return api;
+}
+
+// The reservation holding all of [begin, end), or nullptr.
+Reservation* find_reservation(uintptr_t begin, uintptr_t end) {
+    for (Reservation* r = reservations; r; r = r->next) {
+        if (begin >= r->begin && end <= r->end && begin < end) return r;
     }
+    return nullptr;
 }
 
 Page* find_page(ULONG_PTR tag) {
@@ -110,7 +131,11 @@ bool valid_span(PVOID base, SIZE_T count, SIZE_T size) {
 
 bool remove_view(View** link) {
     View* view = *link;
-    if (!UnmapViewOfFile(view->address)) return false;
+    const bool unmapped = view->preserve
+        ? placeholder_api().unmap && placeholder_api().unmap(GetCurrentProcess(), view->address,
+                                                             MEM_PRESERVE_PLACEHOLDER)
+        : UnmapViewOfFile(view->address) != 0;
+    if (!unmapped) return false;
     *link = view->next;
     delete view;
     return true;
@@ -151,50 +176,112 @@ PVOID unmap_span(BYTE* base, SIZE_T count, SIZE_T size) {
     return base;
 }
 
-// Duplicate tags in `tags` are intentionally permitted so a single virtual span
-// can alias one physical page at multiple offsets (e.g. ring buffers / tiles).
-PVOID map_pages(PVOID address, SIZE_T count, uint64_t flags, const ULONG_PTR* tags) {
-    const SIZE_T size = page_size(flags);
-    if (!valid_span(address, count, size)) {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return nullptr;
-    }
-
-    Lock lock;
-    if (!tags) return unmap_span(static_cast<BYTE*>(address), count, size);
-
-    static const PlaceholderApi api;
-    if (!api.reserve || !api.replace) {
-        BX_STUB_LOG("xmem.dll", "MapViewOfFile3");
-        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-        return nullptr;
-    }
-
-    View* pending = nullptr;
-    for (SIZE_T i = count; i > 0; --i) {
-        Page* page = find_page(tags[i - 1]);
-        if (!page || page->block->size != size) {
-            destroy_views(pending);
+// Builds one unlinked View per tag, in order, after checking that every tag names a live page.
+bool build_views(const ULONG_PTR* tags, SIZE_T count, bool preserve, View** out) {
+    View* first = nullptr;
+    View** tail = &first;
+    for (SIZE_T i = 0; i < count; ++i) {
+        Page* page = find_page(tags[i]);
+        if (!page) {
+            destroy_views(first);
             SetLastError(ERROR_INVALID_PARAMETER);
-            return nullptr;
+            return false;
         }
-        auto* view = new (std::nothrow) View{page, nullptr, pending};
+        auto* view = new (std::nothrow) View{page, nullptr, nullptr, preserve};
         if (!view) {
-            destroy_views(pending);
+            destroy_views(first);
             SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return false;
+        }
+        *tail = view;
+        tail = &view->next;
+    }
+    *out = first;
+    return true;
+}
+
+// Removes every view that starts in [begin, end). Views in a reservation keep its placeholder.
+bool unmap_range(uintptr_t begin, uintptr_t end) {
+    for (View** link = &views; *link;) {
+        const auto address = reinterpret_cast<uintptr_t>((*link)->address);
+        if (address >= begin && address < end) {
+            if (!remove_view(link)) return false;
+        } else {
+            link = &(*link)->next;
+        }
+    }
+    return true;
+}
+
+// Maps `view`'s page at `address` inside a reservation: splits the 64 KB slot out of the
+// placeholder (a slot that is already its own placeholder needs no split) and replaces it.
+bool map_into_placeholder(View* view, BYTE* address, DWORD protect) {
+    const PlaceholderApi& api = placeholder_api();
+    VirtualFree(address, small_page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+    if (!api.replace(view->page->section, GetCurrentProcess(), address, 0, small_page,
+                     MEM_REPLACE_PLACEHOLDER, protect, nullptr, 0)) {
+        return false;
+    }
+    view->address = address;
+    return true;
+}
+
+void publish(View* pending) {
+    while (pending) {
+        View* next = pending->next;
+        pending->next = views;
+        views = pending;
+        pending = next;
+    }
+}
+
+// XMemMapPhysicalPages into an XMEM_MAPPABLE reservation. Pages already mapped in the range are
+// unmapped first; a NULL `tags` only unmaps. Duplicate tags alias one page at several offsets.
+PVOID map_reserved(Reservation* reservation, BYTE* base, SIZE_T count, const ULONG_PTR* tags) {
+    if (reservation->page != small_page) {
+        BX_STUB_LOG("xmem.dll", "XMemMapPhysicalPages(MEM_2MB_PAGES)");
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return nullptr;
+    }
+    const auto begin = reinterpret_cast<uintptr_t>(base);
+    View* pending = nullptr;
+    if (tags && !build_views(tags, count, true, &pending)) return nullptr;
+    if (!unmap_range(begin, begin + count * small_page)) {
+        const DWORD error = GetLastError();
+        destroy_views(pending);
+        SetLastError(error);
+        return nullptr;
+    }
+    BYTE* cursor = base;
+    for (View* view = pending; view; view = view->next, cursor += small_page) {
+        if (!map_into_placeholder(view, cursor, reservation->protect)) {
+            const DWORD error = GetLastError();
+            for (View* done = pending; done != view; done = done->next) {
+                placeholder_api().unmap(GetCurrentProcess(), done->address, MEM_PRESERVE_PLACEHOLDER);
+            }
+            destroy_views(pending);
+            SetLastError(error);
             return nullptr;
         }
-        pending = view;
     }
+    publish(pending);
+    return base;
+}
+
+// BetterXen extension, used by synthetic fixtures: with no address, reserve a fresh
+// placeholder of `count` pages and map `tags` into it. Unmapping such a span frees it.
+PVOID map_unreserved(SIZE_T count, const ULONG_PTR* tags) {
+    const PlaceholderApi& api = placeholder_api();
+    View* pending = nullptr;
+    if (!build_views(tags, count, false, &pending)) return nullptr;
 
     MEM_ADDRESS_REQUIREMENTS requirements{};
-    requirements.Alignment = size;
+    requirements.Alignment = small_page;
     MEM_EXTENDED_PARAMETER alignment{};
     alignment.Type = MemExtendedParameterAddressRequirements;
     alignment.Pointer = &requirements;
-    auto* base = static_cast<BYTE*>(api.reserve(nullptr, address, count * size,
-        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
-        address ? nullptr : &alignment, address ? 0 : 1));
+    auto* base = static_cast<BYTE*>(api.reserve(nullptr, nullptr, count * small_page,
+        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, &alignment, 1));
     if (!base) {
         const DWORD error = GetLastError();
         destroy_views(pending);
@@ -205,13 +292,13 @@ PVOID map_pages(PVOID address, SIZE_T count, uint64_t flags, const ULONG_PTR* ta
     BYTE* cursor = base;
     SIZE_T remaining = count;
     View* view = pending;
-    for (; view; view = view->next, cursor += size, --remaining) {
+    for (; view; view = view->next, cursor += small_page, --remaining) {
         const bool split = remaining > 1;
-        if (split && !VirtualFree(cursor, size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) break;
-        if (!api.replace(view->page->section, nullptr, cursor, 0, size,
+        if (split && !VirtualFree(cursor, small_page, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) break;
+        if (!api.replace(view->page->section, GetCurrentProcess(), cursor, 0, small_page,
                          MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0)) {
             const DWORD error = GetLastError();
-            if (split) VirtualFree(cursor + size, 0, MEM_RELEASE);
+            if (split) VirtualFree(cursor + small_page, 0, MEM_RELEASE);
             SetLastError(error);
             break;
         }
@@ -228,27 +315,85 @@ PVOID map_pages(PVOID address, SIZE_T count, uint64_t flags, const ULONG_PTR* ta
         SetLastError(error);
         return nullptr;
     }
-
-    while (pending) {
-        View* next = pending->next;
-        pending->next = views;
-        views = pending;
-        pending = next;
-    }
+    publish(pending);
     return base;
+}
+
+bool have_placeholder_api() {
+    const PlaceholderApi& api = placeholder_api();
+    if (api.reserve && api.replace && api.unmap) return true;
+    BX_STUB_LOG("xmem.dll", "MapViewOfFile3");
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return false;
 }
 } // namespace
 
-// Clean-room synthetic signatures modeled after public Win32 AWE
-// AllocateUserPhysicalPages / FreeUserPhysicalPages (memoryapi.h, [in, out]
-// page count pointer), pending a public console flags/signature ABI.
-extern "C" BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T* num_pages, PULONG_PTR page_array,
-                                               uint64_t flags) {
-    const SIZE_T size = page_size(flags);
-    if (!num_pages || !page_array || !valid_span(nullptr, *num_pages, size)) {
+namespace bx_xmem {
+
+PVOID reserve_mappable(PVOID address, SIZE_T size, SIZE_T page, DWORD protect) {
+    const PlaceholderApi& api = placeholder_api();
+    const auto requested = reinterpret_cast<uintptr_t>(address);
+    if (!have_placeholder_api()) return nullptr;
+    if (!size || size > std::numeric_limits<uintptr_t>::max() - requested - page) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    // A reservation's base rounds down to its page size and its end rounds up.
+    const uintptr_t begin = requested - requested % page;
+    const uintptr_t end = (requested + size + page - 1) / page * page;
+
+    MEM_ADDRESS_REQUIREMENTS requirements{};
+    requirements.Alignment = page;
+    MEM_EXTENDED_PARAMETER alignment{};
+    alignment.Type = MemExtendedParameterAddressRequirements;
+    alignment.Pointer = &requirements;
+    auto* reservation = new (std::nothrow) Reservation{};
+    if (!reservation) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return nullptr;
+    }
+    PVOID base = api.reserve(GetCurrentProcess(), begin ? reinterpret_cast<PVOID>(begin) : nullptr,
+                             end - begin, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                             begin ? nullptr : &alignment, begin ? 0 : 1);
+    if (!base) {
+        delete reservation;
+        return nullptr;
+    }
+
+    Lock lock;
+    const auto b = reinterpret_cast<uintptr_t>(base);
+    // A range the title released with VirtualFree may come back: drop stale records over it.
+    for (Reservation** link = &reservations; *link;) {
+        if ((*link)->begin < b + (end - begin) && b < (*link)->end) {
+            Reservation* stale = *link;
+            *link = stale->next;
+            delete stale;
+        } else {
+            link = &(*link)->next;
+        }
+    }
+    *reservation = {b, b + (end - begin), page, protect, reservations};
+    reservations = reservation;
+    return base;
+}
+
+} // namespace bx_xmem
+
+// Authorized GDK documentation: XMemAllocatePhysicalPages(XMemFlags, NumberOfPages,
+// PageArray), in 64 KB pages. XMEM_2MB_CLUSTERS is not implemented.
+extern "C" BOOL WINAPI XMemAllocatePhysicalPages(uint64_t flags, PULONG_PTR num_pages,
+                                               PULONG_PTR page_array) {
+    if ((flags & ~(xmem_2mb_clusters | xmem_bandwidth_bits)) != 0 || !num_pages || !page_array
+        || !valid_span(nullptr, *num_pages, small_page)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    if (flags & xmem_2mb_clusters) {
+        BX_STUB_LOG("xmem.dll", "XMemAllocatePhysicalPages(XMEM_2MB_CLUSTERS)");
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+    const SIZE_T size = small_page;
 
     Lock lock;
     const SIZE_T count = *num_pages;
@@ -297,22 +442,19 @@ extern "C" BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T* num_pages, PULONG_PTR p
     return TRUE;
 }
 
-// Rejects unknown, wrong-size, or duplicate tags in `page_array` with
-// ERROR_INVALID_PARAMETER without mutating `page_array` or live views.
-extern "C" BOOL WINAPI XMemFreePhysicalPages(SIZE_T* num_pages, PULONG_PTR page_array,
-                                           uint64_t flags) {
-    const SIZE_T size = page_size(flags);
-    if (!num_pages || !page_array || !valid_span(nullptr, *num_pages, size)) {
+// XMemFreePhysicalPages(NumberOfPages, PageArray). Unknown or duplicate tags in `page_array`
+// fail with ERROR_INVALID_PARAMETER without changing `page_array` or live views.
+extern "C" BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR count, PULONG_PTR page_array) {
+    if (!page_array || !valid_span(nullptr, count, small_page)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
     Lock lock;
-    const SIZE_T count = *num_pages;
     SIZE_T validated = 0;
     for (; validated < count; ++validated) {
         Page* page = find_page(page_array[validated]);
-        if (!page || page->block->size != size || page->releasing) break;
+        if (!page || page->releasing) break;
         page->releasing = true;
     }
     if (validated != count) {
@@ -350,18 +492,78 @@ extern "C" BOOL WINAPI XMemFreePhysicalPages(SIZE_T* num_pages, PULONG_PTR page_
             delete_block(block);
         }
     }
-    bx_xmem::release_physical(static_cast<uint64_t>(count) * size);
+    bx_xmem::release_physical(static_cast<uint64_t>(count) * small_page);
     return TRUE;
 }
 
-extern "C" PVOID WINAPI XMemMapPhysicalPages(PVOID base, SIZE_T count, uint64_t flags,
-                                            PULONG_PTR page_array) {
-    return map_pages(base, count, flags, page_array);
+// XMemMapPhysicalPages(VirtualAddress, NumberOfPages, PageArray). The address must lie in an
+// XMemVirtualAlloc(MEM_RESERVE | MEM_64K_PAGES, XMEM_MAPPABLE) reservation. A NULL address is a
+// BetterXen extension (see map_unreserved); a span mapped that way is unmapped as a whole.
+extern "C" PVOID WINAPI XMemMapPhysicalPages(PVOID address, ULONG_PTR count, PULONG_PTR page_array) {
+    if (!valid_span(address, count, small_page)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    if (!have_placeholder_api()) return nullptr;
+    Lock lock;
+    auto* base = static_cast<BYTE*>(address);
+    const auto begin = reinterpret_cast<uintptr_t>(address);
+    if (address) {
+        if (Reservation* reservation = find_reservation(begin, begin + count * small_page)) {
+            return map_reserved(reservation, base, count, page_array);
+        }
+        if (!page_array) return unmap_span(base, count, small_page);
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    if (!page_array) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    return map_unreserved(count, page_array);
 }
 
-extern "C" PVOID WINAPI XMemMapPhysicalPagesScatter(PVOID base, SIZE_T count, uint64_t flags,
-                                                   PULONG_PTR page_array) {
-    return map_pages(base, count, flags, page_array);
+// XMemMapPhysicalPagesScatter(VirtualAddressArray, NumberOfPages, PageArray): parallel arrays of
+// 64 KB slots in XMEM_MAPPABLE reservations and page tags. A NULL `page_array`, or a 0 tag,
+// unmaps the slot. All entries are checked before any is changed.
+extern "C" BOOL WINAPI XMemMapPhysicalPagesScatter(PVOID* addresses, ULONG_PTR count,
+                                                  PULONG_PTR page_array) {
+    if (!addresses || !count) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!have_placeholder_api()) return FALSE;
+    Lock lock;
+    for (ULONG_PTR i = 0; i < count; ++i) {
+        const auto slot = reinterpret_cast<uintptr_t>(addresses[i]);
+        Reservation* reservation = slot % small_page == 0 ? find_reservation(slot, slot + small_page) : nullptr;
+        if (!reservation || (page_array && page_array[i] && !find_page(page_array[i]))) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        if (reservation->page != small_page) {
+            BX_STUB_LOG("xmem.dll", "XMemMapPhysicalPagesScatter(MEM_2MB_PAGES)");
+            SetLastError(ERROR_NOT_SUPPORTED);
+            return FALSE;
+        }
+    }
+    for (ULONG_PTR i = 0; i < count; ++i) {
+        auto* slot = static_cast<BYTE*>(addresses[i]);
+        const auto begin = reinterpret_cast<uintptr_t>(slot);
+        if (!unmap_range(begin, begin + small_page)) return FALSE;
+        if (!page_array || !page_array[i]) continue;
+        View* view = nullptr;
+        if (!build_views(&page_array[i], 1, true, &view)) return FALSE;
+        if (!map_into_placeholder(view, slot,
+                                  find_reservation(begin, begin + small_page)->protect)) {
+            const DWORD error = GetLastError();
+            destroy_views(view);
+            SetLastError(error);
+            return FALSE;
+        }
+        publish(view);
+    }
+    return TRUE;
 }
 
 extern "C" int bx_xmem_query_region(uint64_t va, bx_xmem_region_info_t* out_info) {

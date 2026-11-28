@@ -28,9 +28,9 @@ __declspec(dllimport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void* config);
 __declspec(dllimport) HRESULT WINAPI D3D12XboxCreateDevice(void* params, REFIID riid, void** ppv);
 __declspec(dllimport) PVOID WINAPI XMemAlloc(SIZE_T size, uint64_t attributes);
 __declspec(dllimport) VOID WINAPI XMemFree(PVOID address, uint64_t attributes);
-__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T* count, PULONG_PTR pages, uint64_t flags);
-__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(SIZE_T* count, PULONG_PTR pages, uint64_t flags);
-__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID base, SIZE_T count, uint64_t flags, PULONG_PTR pages);
+__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(uint64_t flags, PULONG_PTR count, PULONG_PTR pages);
+__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR count, PULONG_PTR pages);
+__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID base, ULONG_PTR count, PULONG_PTR pages);
 __declspec(dllimport) BOOL WINAPI XMemGetWorkingSetStatistics(PVOID out_stats, SIZE_T stats_size);
 }
 
@@ -724,9 +724,9 @@ int main() {
     SIZE_T page_count = 2;
     ULONG_PTR pages[2] = {};
     uint8_t* view = nullptr;
-    bool mapped = XMemAllocatePhysicalPages(&page_count, pages, 0) && page_count == 2 && pages[0] != 0 && pages[1] != 0;
+    bool mapped = XMemAllocatePhysicalPages(0, &page_count, pages) && page_count == 2 && pages[0] != 0 && pages[1] != 0;
     if (mapped) {
-        view = static_cast<uint8_t*>(XMemMapPhysicalPages(nullptr, page_count, 0, pages));
+        view = static_cast<uint8_t*>(XMemMapPhysicalPages(nullptr, page_count, pages));
         mapped = view != nullptr && (reinterpret_cast<uintptr_t>(view) % kAlign) == 0;
         if (mapped) {
             view[kAlign] = 0x5A;
@@ -1521,11 +1521,10 @@ int main() {
     }
 
     if (view) {
-        XMemMapPhysicalPages(view, page_count, 0, nullptr);
+        XMemMapPhysicalPages(view, page_count, nullptr);
     }
     if (pages[0] || pages[1]) {
-        SIZE_T free_count = 2;
-        XMemFreePhysicalPages(&free_count, pages, 0);
+        XMemFreePhysicalPages(2, pages);
     }
     if (sync.ready) CloseHandle(sync.ready);
     if (sync.done) CloseHandle(sync.done);

@@ -181,16 +181,32 @@ VOID WINAPI XMemFree(PVOID address, uint64_t attributes) {
     XMemFreeDefault(address, attributes);
 }
 
-PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, DWORD protect) {
+/*
+ * XMemVirtualAlloc(BaseAddress, Size, AllocationType, XMemFlags, PageProtection), as the
+ * authorized GDK documentation gives it. AllocationType may carry MEM_64K_PAGES (0x20400000) or
+ * MEM_2MB_PAGES (0x20000000). An XMEM_MAPPABLE (0x20) reservation is a placeholder for
+ * XMemMapPhysicalPages. The other XMemFlags (CPU, graphics, address-width limits) select
+ * console memory types the host does not distinguish, so plain reservations and commits
+ * ignore them.
+ */
+PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, uint64_t xmem_flags,
+                              DWORD protect) {
+    constexpr DWORD mem_64k_pages = 0x20400000;
+    constexpr DWORD mem_2mb_pages = 0x20000000;
+    constexpr uint64_t xmem_mappable = 0x20;
+    if (xmem_flags & xmem_mappable) {
+        const SIZE_T mappable_page = (alloc_type & mem_64k_pages) == mem_64k_pages ? 64 * 1024
+            : (alloc_type & mem_2mb_pages) ? 2 * 1024 * 1024 : 0;
+        if (!mappable_page || !(alloc_type & MEM_RESERVE) || (alloc_type & MEM_COMMIT)) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return nullptr;
+        }
+        return bx_xmem::reserve_mappable(address, size, mappable_page, protect);
+    }
     /* Strip console-only high bits before forwarding to standard Win32 VirtualAlloc. */
     DWORD win_alloc = alloc_type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN);
     if (win_alloc == 0) win_alloc = MEM_COMMIT | MEM_RESERVE;
-    /* Console callers may pass multi-bit Xbox memory attributes (e.g. 0x21) in arg 4;
-     * valid Win32 base page protections are a single power-of-two bit in 0x01..0x80. */
-    DWORD low_prot = protect & 0xFFu;
-    DWORD win_prot = (low_prot != 0 && (low_prot & (low_prot - 1)) == 0)
-        ? (protect & (0xFFu | PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE))
-        : PAGE_READWRITE;
+    const DWORD win_prot = protect;
     /* MEM_RESET combined with MEM_COMMIT is rejected by Win32 VirtualAlloc, so returning
      * early here cannot commit pages outside the working-set budget. */
     if (!(win_alloc & MEM_COMMIT) || (win_alloc & MEM_RESET)) {

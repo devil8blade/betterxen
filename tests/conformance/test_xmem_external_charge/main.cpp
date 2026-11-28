@@ -9,7 +9,7 @@
 #include "bx_xmem_internal.h"
 
 extern "C" {
-PVOID WINAPI XMemVirtualAlloc(PVOID, SIZE_T, DWORD, DWORD);
+PVOID WINAPI XMemVirtualAlloc(PVOID, SIZE_T, DWORD, uint64_t, DWORD);
 BOOL WINAPI XMemGetWorkingSetStatistics(PVOID, SIZE_T);
 }
 
@@ -49,7 +49,7 @@ int main() {
 
     // ...and a later XMem commit is refused against the same cap.
     SetLastError(0);
-    CHECK(!XMemVirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    CHECK(!XMemVirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, 0x1 /* XMEM_CPU */, PAGE_READWRITE));
     CHECK(GetLastError() == ERROR_NOT_ENOUGH_MEMORY);
 
     // An over-release is refused and leaves the outstanding charge in place.
@@ -62,7 +62,7 @@ int main() {
     bx_xmem_release_charge_external(headroom);
     CHECK(XMemGetWorkingSetStatistics(&stats, sizeof(stats)));
     CHECK(stats.committed_virtual_bytes + stats.allocated_physical_bytes == used);
-    void* block = XMemVirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void* block = XMemVirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, 0x1 /* XMEM_CPU */, PAGE_READWRITE);
     CHECK(block != nullptr);
     CHECK(VirtualFree(block, 0, MEM_RELEASE));
 

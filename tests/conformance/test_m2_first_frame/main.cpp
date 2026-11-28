@@ -26,9 +26,9 @@ using Microsoft::WRL::ComPtr;
 extern "C" {
 __declspec(dllimport) HRESULT WINAPI D3D12ConfigureVirtualMemoryX(void*);
 __declspec(dllimport) HRESULT WINAPI D3D12XboxCreateDevice(void*, REFIID, void**);
-__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(SIZE_T*, PULONG_PTR, uint64_t);
-__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(SIZE_T*, PULONG_PTR, uint64_t);
-__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID, SIZE_T, uint64_t, PULONG_PTR);
+__declspec(dllimport) BOOL WINAPI XMemAllocatePhysicalPages(uint64_t, PULONG_PTR, PULONG_PTR);
+__declspec(dllimport) BOOL WINAPI XMemFreePhysicalPages(ULONG_PTR, PULONG_PTR);
+__declspec(dllimport) PVOID WINAPI XMemMapPhysicalPages(PVOID, ULONG_PTR, PULONG_PTR);
 }
 
 namespace {
@@ -107,9 +107,9 @@ struct Region {
             cleanup(D3D12ConfigureVirtualMemoryX(&config) == S_OK, "clear configured region");
         }
         if (view)
-            cleanup(XMemMapPhysicalPages(view, count, 0, nullptr) == view, "unmap physical page");
+            cleanup(XMemMapPhysicalPages(view, count, nullptr) == view, "unmap physical page");
         if (page)
-            cleanup(XMemFreePhysicalPages(&count, &page, 0), "free physical page");
+            cleanup(XMemFreePhysicalPages(count, &page), "free physical page");
     }
 };
 // Declared just before ExecuteCommandLists, so on a failure after the submit it is
@@ -161,8 +161,8 @@ void run(bool inject_pixel_mismatch) {
 
     stage = "placed_resource";
     Region region;
-    require(XMemAllocatePhysicalPages(&region.count, &region.page, 0) && region.count == 1, "allocate physical page");
-    region.view = XMemMapPhysicalPages(nullptr, 1, 0, &region.page);
+    require(XMemAllocatePhysicalPages(0, &region.count, &region.page) && region.count == 1, "allocate physical page");
+    region.view = XMemMapPhysicalPages(nullptr, 1, &region.page);
     require(region.view, "map physical page");
     std::memset(region.view, Region::sentinel, Region::page_bytes);
     region.config.base_va = reinterpret_cast<uintptr_t>(region.view);
