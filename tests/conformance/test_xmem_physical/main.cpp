@@ -33,6 +33,10 @@ constexpr uint64_t kXMemCpu = 0x1;
 constexpr uint64_t kXMemMappable = 0x20;
 constexpr uint64_t kXMem2MBClusters = 0x20000000;
 constexpr uint64_t kXMemGpuOptimalBandwidthRequired = 0x280;
+constexpr uint64_t kXMemGraphics32BitAddress = 0x7;
+constexpr DWORD kMemReservePlaceholder = 0x40000;
+constexpr DWORD kMemReplacePlaceholder = 0x4000;
+constexpr DWORD kPageGraphicsReadWrite = 0x2000;
 
 #define CHECK(condition)                                                        \
     do {                                                                        \
@@ -159,6 +163,31 @@ bool check_physical_pages() {
     CHECK(!XMemMapPhysicalPages(large, 1, page));
     CHECK(GetLastError() == ERROR_NOT_SUPPORTED);
     VirtualFree(large, 0, MEM_RELEASE);
+
+    // A title can manage the placeholder itself: reserve one below 4 GB, split it with VirtualFree
+    // and MEM_PRESERVE_PLACEHOLDER, turn one part into a mappable range with MEM_REPLACE_PLACEHOLDER
+    // (with GPU protection bits the host ignores) and map pages into it.
+    auto* region = static_cast<BYTE*>(XMemVirtualAlloc(nullptr, 4 * kPage, MEM_RESERVE | kMemReservePlaceholder,
+                                                       kXMemGraphics32BitAddress, PAGE_NOACCESS));
+    CHECK(region && reinterpret_cast<uintptr_t>(region) + 4 * kPage <= 0x100000000ull);
+    CHECK(VirtualFree(region, 2 * kPage, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER));
+    auto* part = static_cast<BYTE*>(XMemVirtualAlloc(region, 2 * kPage,
+                                                     MEM_RESERVE | kMemReplacePlaceholder | kMem64KPages,
+                                                     kXMemMappable | kXMemGraphics32BitAddress,
+                                                     PAGE_READWRITE | kPageGraphicsReadWrite));
+    CHECK(part == region);
+    ULONG_PTR two = 2;
+    ULONG_PTR part_pages[2]{};
+    CHECK(XMemAllocatePhysicalPages(kXMemGpuOptimalBandwidthRequired, &two, part_pages));
+    CHECK(XMemMapPhysicalPages(part, 2, part_pages) == part);
+    part[kPage + 5] = 0x6c;
+    CHECK(part[kPage + 5] == 0x6c && state_of(part) == MEM_COMMIT);
+    CHECK(state_of(region + 2 * kPage) == MEM_RESERVE);
+    // Replacing a range that is not a placeholder fails.
+    CHECK(!XMemVirtualAlloc(part, kPage, MEM_RESERVE | kMemReplacePlaceholder | kMem64KPages, kXMemMappable,
+                            PAGE_READWRITE));
+    CHECK(XMemFreePhysicalPages(2, part_pages));
+    CHECK(state_of(part) == MEM_RESERVE);
 
     // BetterXen extension: a NULL address picks a span; unmapping it frees it.
     auto* picked = static_cast<BYTE*>(XMemMapPhysicalPages(nullptr, 1, page));

@@ -33,6 +33,13 @@ remains unsupported.
   - **Signatures:** `XMemAllocatePhysicalPages(XMemFlags, NumberOfPages, PageArray)`, `XMemFreePhysicalPages(NumberOfPages, PageArray)` (count by value), `XMemMapPhysicalPages(VirtualAddress, NumberOfPages, PageArray)` and `XMemMapPhysicalPagesScatter(VirtualAddressArray, NumberOfPages, PageArray)` (parallel arrays, returns `BOOL`). `XMemVirtualAlloc(BaseAddress, Size, AllocationType, XMemFlags, PageProtection)` takes five arguments, which supersedes the closed #518.
   - **Pages and flags:** physical pages are always 64 KB. The four memory-bandwidth values are accepted. `XMEM_2MB_CLUSTERS` and mapping into `MEM_2MB_PAGES` reservations are not implemented: they log `BX_STUB_LOG` and fail with `ERROR_NOT_SUPPORTED`. Other flag bits fail with `ERROR_INVALID_PARAMETER`.
   - **Mapping:** `XMemVirtualAlloc(MEM_RESERVE | MEM_64K_PAGES, XMEM_MAPPABLE)` reserves a placeholder, and `XMemMapPhysicalPages` maps into it. It replaces pages already mapped there, a NULL page array unmaps, and an unmapped range stays reserved and can be mapped again. Scatter checks every entry before changing any, and a 0 tag unmaps its slot. Mapping outside a mappable reservation is refused. A NULL address remains a BetterXen extension for synthetic fixtures: the shim picks the span, and unmapping it frees it.
+  - **Title-managed placeholders:**
+    - `XMemVirtualAlloc(MEM_RESERVE | MEM_RESERVE_PLACEHOLDER)` reserves a placeholder the title splits itself with `VirtualFree(MEM_PRESERVE_PLACEHOLDER)`.
+    - `MEM_REPLACE_PLACEHOLDER` with `XMEM_MAPPABLE` turns a split part into a mappable range without a new reservation. It is refused unless the part is still a placeholder.
+    - `XMEM_GRAPHICS_32BIT_ADDRESS` keeps new reservations below 4 GB.
+    - The `PAGE_GRAPHICS_*` protection bits set a GPU view the host does not have, so mapped views use the low-byte CPU protection.
+    - Replacing a placeholder with committed memory is not implemented and logs `BX_STUB_LOG`.
+    - A project-authorized target build lays out its descriptor memory this way.
   - **Tests:** `test_xmem_physical` is rewritten against the documented contracts, with constants written out from the documentation, and fails against the previous `xmem.dll`. `test_xmem`, `test_xmem_external_charge`, `test_d3d12_placed`, `test_d3d12_vmem_xbox`, `test_m2_first_frame` and `test_integration_boot` use the documented signatures.
   - **Not covered:** `XMemVirtualQuery`, `XMemGetWorkingSetStatistics` and `XMemTransferMemory` still differ from their documented signatures (#642).
 - A recognized BetterXen `BXVM` configuration is validated before an unwritable output can trigger the logged fallback. Invalid sizes still return `E_INVALIDARG` on read-only pages.

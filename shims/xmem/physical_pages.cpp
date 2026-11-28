@@ -330,10 +330,35 @@ bool have_placeholder_api() {
 
 namespace bx_xmem {
 
-PVOID reserve_mappable(PVOID address, SIZE_T size, SIZE_T page, DWORD protect) {
+PVOID reserve_placeholder(PVOID address, SIZE_T size, uintptr_t highest) {
+    const PlaceholderApi& api = placeholder_api();
+    if (!have_placeholder_api()) return nullptr;
+    const auto requested = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t begin = requested - requested % small_page;
+    if (!size || size > std::numeric_limits<uintptr_t>::max() - requested - small_page) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
+    const uintptr_t end = (requested + size + small_page - 1) / small_page * small_page;
+    MEM_ADDRESS_REQUIREMENTS requirements{};
+    requirements.Alignment = small_page;
+    requirements.HighestEndingAddress = highest ? reinterpret_cast<PVOID>(highest) : nullptr;
+    MEM_EXTENDED_PARAMETER parameter{};
+    parameter.Type = MemExtendedParameterAddressRequirements;
+    parameter.Pointer = &requirements;
+    return api.reserve(GetCurrentProcess(), begin ? reinterpret_cast<PVOID>(begin) : nullptr, end - begin,
+                       MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, begin ? nullptr : &parameter,
+                       begin ? 0 : 1);
+}
+
+PVOID reserve_mappable(PVOID address, SIZE_T size, SIZE_T page, DWORD protect, bool adopt, uintptr_t highest) {
     const PlaceholderApi& api = placeholder_api();
     const auto requested = reinterpret_cast<uintptr_t>(address);
     if (!have_placeholder_api()) return nullptr;
+    if (adopt && (!address || requested % page != 0 || size % page != 0)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return nullptr;
+    }
     if (!size || size > std::numeric_limits<uintptr_t>::max() - requested - page) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return nullptr;
@@ -344,6 +369,7 @@ PVOID reserve_mappable(PVOID address, SIZE_T size, SIZE_T page, DWORD protect) {
 
     MEM_ADDRESS_REQUIREMENTS requirements{};
     requirements.Alignment = page;
+    requirements.HighestEndingAddress = highest ? reinterpret_cast<PVOID>(highest) : nullptr;
     MEM_EXTENDED_PARAMETER alignment{};
     alignment.Type = MemExtendedParameterAddressRequirements;
     alignment.Pointer = &requirements;
@@ -352,9 +378,23 @@ PVOID reserve_mappable(PVOID address, SIZE_T size, SIZE_T page, DWORD protect) {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         return nullptr;
     }
-    PVOID base = api.reserve(GetCurrentProcess(), begin ? reinterpret_cast<PVOID>(begin) : nullptr,
-                             end - begin, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
-                             begin ? nullptr : &alignment, begin ? 0 : 1);
+    PVOID base = nullptr;
+    if (adopt) {
+        // MEM_REPLACE_PLACEHOLDER: the title split this range out of its own placeholder; it
+        // stays as it is and becomes mappable.
+        MEMORY_BASIC_INFORMATION region{};
+        if (!VirtualQuery(address, &region, sizeof(region)) || region.State != MEM_RESERVE
+            || reinterpret_cast<uintptr_t>(region.BaseAddress) != requested || region.RegionSize < size) {
+            delete reservation;
+            SetLastError(ERROR_INVALID_ADDRESS);
+            return nullptr;
+        }
+        base = address;
+    } else {
+        base = api.reserve(GetCurrentProcess(), begin ? reinterpret_cast<PVOID>(begin) : nullptr,
+                           end - begin, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+                           begin ? nullptr : &alignment, begin ? 0 : 1);
+    }
     if (!base) {
         delete reservation;
         return nullptr;

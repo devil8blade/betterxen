@@ -193,7 +193,15 @@ PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, uint
                               DWORD protect) {
     constexpr DWORD mem_64k_pages = 0x20400000;
     constexpr DWORD mem_2mb_pages = 0x20000000;
+    constexpr DWORD mem_reserve_placeholder = 0x00040000;
+    constexpr DWORD mem_replace_placeholder = 0x00004000;
     constexpr uint64_t xmem_mappable = 0x20;
+    constexpr uint64_t xmem_graphics_32bit_address = 0x7;
+    // PAGE_GRAPHICS_* bits (0x800 and up) set the GPU view, which the host does not have; the
+    // CPU protection is the low byte.
+    const DWORD cpu_protect = protect & 0xFF;
+    const uintptr_t highest = (xmem_flags & xmem_graphics_32bit_address) == xmem_graphics_32bit_address
+        ? 0xFFFFFFFFull : 0;
     if (xmem_flags & xmem_mappable) {
         const SIZE_T mappable_page = (alloc_type & mem_64k_pages) == mem_64k_pages ? 64 * 1024
             : (alloc_type & mem_2mb_pages) ? 2 * 1024 * 1024 : 0;
@@ -201,12 +209,26 @@ PVOID WINAPI XMemVirtualAlloc(PVOID address, SIZE_T size, DWORD alloc_type, uint
             SetLastError(ERROR_INVALID_PARAMETER);
             return nullptr;
         }
-        return bx_xmem::reserve_mappable(address, size, mappable_page, protect);
+        return bx_xmem::reserve_mappable(address, size, mappable_page, cpu_protect,
+                                         (alloc_type & mem_replace_placeholder) != 0, highest);
+    }
+    if (alloc_type & mem_reserve_placeholder) {
+        if ((alloc_type & (MEM_COMMIT | mem_replace_placeholder)) || !(alloc_type & MEM_RESERVE)) {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return nullptr;
+        }
+        return bx_xmem::reserve_placeholder(address, size, highest);
+    }
+    if (alloc_type & mem_replace_placeholder) {
+        // Committing over a title-managed placeholder is not implemented (no caller seen yet).
+        BX_STUB_LOG("xmem.dll", "XMemVirtualAlloc(MEM_REPLACE_PLACEHOLDER)");
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return nullptr;
     }
     /* Strip console-only high bits before forwarding to standard Win32 VirtualAlloc. */
     DWORD win_alloc = alloc_type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN);
     if (win_alloc == 0) win_alloc = MEM_COMMIT | MEM_RESERVE;
-    const DWORD win_prot = protect;
+    const DWORD win_prot = protect & (0xFFu | PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE);
     /* MEM_RESET combined with MEM_COMMIT is rejected by Win32 VirtualAlloc, so returning
      * early here cannot commit pages outside the working-set budget. */
     if (!(win_alloc & MEM_COMMIT) || (win_alloc & MEM_RESET)) {
