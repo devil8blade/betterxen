@@ -24,6 +24,7 @@
 - [Upstream Research Registry](research/upstream-registry.md) & [Component Reuse Matrix](research/component-reuse-matrix.md) — Public upstream evaluation and provenance screening.
 - [Primary-Source Verification (2026-11-25)](research/primary-source-verification-2026-11-25.md) & [Hybrid Backlog Research Record](research/hybrid-backlog-research-2026-11-25.md) — Vendor documentation verification notes.
 - [D3D12 Swapchain References under D3DMetal](research/d3dmetal-swapchain-references.md) — Swapchain lifetime results across two Apple Silicon hosts and CrossOver builds.
+- [Target Title Shader Formats](research/target-title-shader-formats.md) — Which shader container formats a project-authorized target build carries in its unencrypted executable code (DXIL acceleration-structure builder, console-only upscaler, stripped executable shaders), and what that means for a first frame on D3DMetal.
 - [D3DMetal GPU Limits](research/d3dmetal-gpu-limits.md) — Constraints a shader translator targeting D3DMetal must handle, measured by the `test_d3dmetal_gpu_limits` fixture (`WaveSize(64)` and SM 6.6 64-bit atomics not run, bounded lock emulation), plus unverified reports kept separate as leads (#453).
 - [Public Technical References](research/sources.md), [Xbox GDK Notes](research/xbox-gdk.md), [RDNA 2 Notes](research/rdna2.md), and [Shader Containers](research/shader-containers.md) — Public specification references for shim and shader work.
 
