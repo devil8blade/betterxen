@@ -50,16 +50,17 @@
  * returns HRESULT_FROM_WIN32(ERROR_RETRY) and discards any newly allocated heap.
  * Any other CreateHeap is the host CreateHeap. The desc is not modified.
  * The live-heap budget charge is taken on create and dropped on the wrapper's
- * final Release. A resource created by CreatePlacedResource holds the wrapper
- * for its lifetime.
+ * final Release. A resource created by CreatePlacedResource,
+ * CreatePlacedResource1 or CreatePlacedResource2 holds the wrapper for its
+ * lifetime, and all three validate the placement on every heap first.
  * GetDevice on every wrapper returns the BxDeviceProxy. An ordinary heap AddRefs
  * that proxy until the wrapper's final Release, matching BxChildProxy, so the
  * caller can release the device and keep the heap. The process-wide backing heap
  * does not AddRef. The cache would keep the device and its charge alive. That
  * pointer is weak. It is cleared when the heap leaves the cache (a new region
  * or a different host device) and when that proxy's last reference drops.
- * CreatePlacedResource1 and CreatePlacedResource2 unwrap the wrapper to the
- * host heap before the host call. The cache records the host ID3D12Device
+ * All three placement methods unwrap the wrapper to the host heap before the
+ * host call. The cache records the host ID3D12Device
  * that built the heap. CreateHeap for a different host device releases the
  * heap and its buffer, credits the charge, and builds a new one. CreateHeap
  * for the same host device returns the cached heap. The check, the retarget,
@@ -137,7 +138,9 @@ constexpr uint64_t BX_D3D12_XBOX_GRAPHICS_BYTES_PER_4MB_PAGE = 0x7F8000000ull;
 
 extern "C" HRESULT bx_d3d12_configure_virtual_memory(void* config);
 
-/* Patches the device proxy vtable so CreateHeap and CreatePlacedResource run the code in vmem.cpp. */
+/* Patches the device proxy vtable so CreateHeap and CreatePlacedResource run the code in vmem.cpp.
+   CreatePlacedResource1 and CreatePlacedResource2 reach the same placement code through the
+   generated proxy (gen_proxy.py HANDOFF), not through a vtable patch. */
 bool bx_vmem_install_device_hooks(void* device);
 
 /* 1->0 Release of a device proxy, under g_section. Compare-exchanges the count from

@@ -377,7 +377,62 @@ void check_concurrent_device_startup() {
     CloseHandle(start);
 }
 
-void check_placed_heap_charge(ID3D12Device* device, const char* log_path, uint64_t region_base, uint64_t cap) {
+/* #554/#572: the three placement entry points. `entry` 0 is CreatePlacedResource
+   (slot 29), 1 is CreatePlacedResource1 (ID3D12Device8 slot 70), 2 is
+   CreatePlacedResource2 (ID3D12Device10 slot 77). A buffer on entry 2 uses the
+   UNDEFINED layout that enhanced barriers require for buffers. Returns false in
+   *available when the device does not expose that entry point. */
+const char* const kPlaceName[3] = {"CreatePlacedResource", "CreatePlacedResource1", "CreatePlacedResource2"};
+
+HRESULT place_buffer(ID3D12Device* device, int entry, ID3D12Heap* heap, UINT64 offset, uint64_t bytes,
+                     D3D12_RESOURCE_STATES state, ID3D12Resource** out, bool* available) {
+    *out = reinterpret_cast<ID3D12Resource*>(static_cast<uintptr_t>(0x1));
+    *available = true;
+    const D3D12_RESOURCE_DESC desc = buffer_desc(bytes);
+    if (entry == 0) {
+        return device->CreatePlacedResource(heap, offset, &desc, state, nullptr, __uuidof(ID3D12Resource),
+                                            reinterpret_cast<void**>(out));
+    }
+    D3D12_RESOURCE_DESC1 desc1{};
+    desc1.Dimension = desc.Dimension;
+    desc1.Width = desc.Width;
+    desc1.Height = desc.Height;
+    desc1.DepthOrArraySize = desc.DepthOrArraySize;
+    desc1.MipLevels = desc.MipLevels;
+    desc1.Format = desc.Format;
+    desc1.SampleDesc = desc.SampleDesc;
+    desc1.Layout = desc.Layout;
+    HRESULT hr = E_NOINTERFACE;
+    if (entry == 1) {
+        ID3D12Device8* dev8 = nullptr;
+        if (device->QueryInterface(__uuidof(ID3D12Device8), reinterpret_cast<void**>(&dev8)) == S_OK && dev8) {
+            hr = dev8->CreatePlacedResource1(heap, offset, &desc1, state, nullptr, __uuidof(ID3D12Resource),
+                                             reinterpret_cast<void**>(out));
+            dev8->Release();
+            return hr;
+        }
+    } else {
+        ID3D12Device10* dev10 = nullptr;
+        if (device->QueryInterface(__uuidof(ID3D12Device10), reinterpret_cast<void**>(&dev10)) == S_OK && dev10) {
+            hr = dev10->CreatePlacedResource2(heap, offset, &desc1, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, 0,
+                                              nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void**>(out));
+            dev10->Release();
+            return hr;
+        }
+    }
+    *out = nullptr;
+    *available = false;
+    return hr;
+}
+
+void skip_case(const char* what, const char* why) {
+    ++g_skipped;
+    std::printf("SKIP: %s: %s\n", what, why);
+    std::fflush(stdout);
+}
+
+void check_placed_heap_charge(ID3D12Device* device, const char* log_path, uint64_t region_base, uint64_t cap,
+                              int entry) {
     const bool capped = cap == (512ull << 20);
     const uint64_t heap_bytes = capped ? 300ull << 20 : kAlign;
     const auto heap_desc = heap_of(D3D12_HEAP_TYPE_UPLOAD, heap_bytes, D3D12_HEAP_FLAG_NONE);
@@ -387,11 +442,17 @@ void check_placed_heap_charge(ID3D12Device* device, const char* log_path, uint64
         return;
     }
     ID3D12Resource* resource = nullptr;
-    const auto desc = buffer_desc(kBufBytes);
-    hr = device->CreatePlacedResource(heap, 0, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                      __uuidof(ID3D12Resource), reinterpret_cast<void**>(&resource));
+    bool available = true;
+    hr = place_buffer(device, entry, heap, 0, kBufBytes, D3D12_RESOURCE_STATE_GENERIC_READ, &resource, &available);
     heap->Release();
-    if (!check(hr == S_OK && resource, "placed resource can outlive the caller's heap reference hr=0x%08lx", ul(hr))) {
+    if (!available) {
+        skip_case(kPlaceName[entry], "the device does not expose this entry point for the heap-charge check");
+        return;
+    }
+    if (!check(hr == S_OK && resource, "%s resource can outlive the caller's heap reference hr=0x%08lx",
+               kPlaceName[entry], ul(hr))) {
+        if (hr != S_OK) resource = nullptr;
+        if (resource) resource->Release();
         return;
     }
 
@@ -404,7 +465,7 @@ void check_placed_heap_charge(ID3D12Device* device, const char* log_path, uint64
     auto cfg = make_block(region_base, kRegionBytes, kFlagBacking);
     hr = D3D12ConfigureVirtualMemoryX(&cfg);
     check(hr == S_OK && last_log_u64(log_path, "gpu_heap_bytes=") == kRegionBytes + heap_bytes,
-          "live placed resource keeps the original heap charge");
+          "live %s resource keeps the original heap charge", kPlaceName[entry]);
 
     if (capped) {
         ID3D12Heap* second = nullptr;
@@ -416,7 +477,7 @@ void check_placed_heap_charge(ID3D12Device* device, const char* log_path, uint64
     resource->Release();
     hr = D3D12ConfigureVirtualMemoryX(&cfg);
     check(hr == S_OK && last_log_u64(log_path, "gpu_heap_bytes=") == kRegionBytes,
-          "final placed resource release credits the original heap");
+          "final %s resource release credits the original heap", kPlaceName[entry]);
 
     if (capped) {
         ID3D12Heap* second = nullptr;
@@ -469,6 +530,105 @@ void check_graphics_xmem_pairing(ID3D12Device* device, uint64_t cap) {
     void* after = XMemAlloc(300ull << 20, 0);
     check(after != nullptr, "pairing: 300 MiB XMemAlloc fits after releasing the graphics heap");
     if (after) XMemFree(after, 0);
+}
+
+/* #554/#572: an ordinary heap from CreateHeap gets the same placement checks as
+   the backing heap on every entry point. Each case is guarded by the alignment the
+   host reports for the buffer, so a host alignment that would make the offset
+   legal skips that case instead of passing it. */
+void check_ordinary_placement(ID3D12Device* device) {
+    const uint64_t heap_bytes = 2 * kAlign;
+    const D3D12_HEAP_DESC def_desc = heap_of(D3D12_HEAP_TYPE_DEFAULT, heap_bytes, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+    const D3D12_HEAP_DESC up_desc = heap_of(D3D12_HEAP_TYPE_UPLOAD, kAlign, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
+    ID3D12Heap* heap = nullptr;
+    ID3D12Heap* upload = nullptr;
+    HRESULT hr = device->CreateHeap(&def_desc, __uuidof(ID3D12Heap), reinterpret_cast<void**>(&heap));
+    if (!check(hr == S_OK && heap, "ordinary DEFAULT heap for placement checks hr=0x%08lx", ul(hr))) {
+        return;
+    }
+    hr = device->CreateHeap(&up_desc, __uuidof(ID3D12Heap), reinterpret_cast<void**>(&upload));
+    check(hr == S_OK && upload, "ordinary UPLOAD heap for placement checks hr=0x%08lx", ul(hr));
+
+    const D3D12_RESOURCE_DESC one = buffer_desc(kAlign);
+    const D3D12_RESOURCE_DESC two = buffer_desc(2 * kAlign);
+    const D3D12_RESOURCE_ALLOCATION_INFO one_info = device->GetResourceAllocationInfo(0, 1, &one);
+    const D3D12_RESOURCE_ALLOCATION_INFO two_info = device->GetResourceAllocationInfo(0, 1, &two);
+    std::printf("ordinary_buffer_alloc align=%llu one=%llu two=%llu\n",
+                static_cast<unsigned long long>(one_info.Alignment),
+                static_cast<unsigned long long>(one_info.SizeInBytes),
+                static_cast<unsigned long long>(two_info.SizeInBytes));
+    std::fflush(stdout);
+    const bool info_ok = one_info.SizeInBytes != 0 && one_info.SizeInBytes != ~0ull && two_info.SizeInBytes != 0 &&
+                         two_info.SizeInBytes != ~0ull;
+    const uint64_t align = one_info.Alignment;
+    const bool misaligned_real = info_ok && align != 0 && (256ull % align) != 0;
+    /* kAlign is aligned, and a 2*kAlign buffer at kAlign ends past a 2*kAlign heap. */
+    const bool overhang_real = info_ok && align != 0 && (kAlign % align) == 0 && two_info.SizeInBytes > kAlign;
+    const bool valid_real = info_ok && align != 0 && (kAlign % align) == 0 && one_info.SizeInBytes <= kAlign;
+
+    for (int entry = 0; entry < 3; ++entry) {
+        const char* name = kPlaceName[entry];
+        char what[96];
+        ID3D12Resource* res = nullptr;
+        bool available = true;
+
+        std::snprintf(what, sizeof(what), "%s misaligned offset on an ordinary heap", name);
+        if (misaligned_real) {
+            hr = place_buffer(device, entry, heap, 256, kAlign, D3D12_RESOURCE_STATE_COMMON, &res, &available);
+            if (!available) {
+                skip_case(name, "the device does not expose this entry point");
+                continue;
+            }
+            check(hr == E_INVALIDARG && res == nullptr, "%s returns E_INVALIDARG and null (alignment %llu) hr=0x%08lx",
+                  what, static_cast<unsigned long long>(align), ul(hr));
+            if (hr == S_OK && res) res->Release();
+        } else {
+            skip_case(what, "the host's buffer alignment makes offset 256 legal");
+        }
+
+        std::snprintf(what, sizeof(what), "%s aligned overhang on an ordinary heap", name);
+        if (overhang_real) {
+            hr = place_buffer(device, entry, heap, kAlign, 2 * kAlign, D3D12_RESOURCE_STATE_COMMON, &res, &available);
+            if (!available) {
+                skip_case(name, "the device does not expose this entry point");
+                continue;
+            }
+            check(hr == E_INVALIDARG && res == nullptr, "%s returns E_INVALIDARG and null hr=0x%08lx", what, ul(hr));
+            if (hr == S_OK && res) res->Release();
+        } else {
+            skip_case(what, "the host's buffer alignment or size does not make it an aligned overhang");
+        }
+
+        std::snprintf(what, sizeof(what), "%s valid nonzero offset on an ordinary heap", name);
+        if (valid_real) {
+            hr = place_buffer(device, entry, heap, kAlign, kAlign, D3D12_RESOURCE_STATE_COMMON, &res, &available);
+            if (!available) {
+                skip_case(name, "the device does not expose this entry point");
+                continue;
+            }
+            check(hr == S_OK && res != nullptr, "%s succeeds hr=0x%08lx", what, ul(hr));
+            if (res && hr == S_OK) res->Release();
+        } else {
+            skip_case(what, "the host's buffer alignment or size does not fit offset 64 KiB");
+        }
+
+        if (entry == 2) {
+            /* CreatePlacedResource2 takes a barrier layout; the state rule does not apply. */
+            continue;
+        }
+        std::snprintf(what, sizeof(what), "%s UPLOAD heap with COPY_DEST state", name);
+        if (upload) {
+            hr = place_buffer(device, entry, upload, 0, 256, D3D12_RESOURCE_STATE_COPY_DEST, &res, &available);
+            if (!available) {
+                skip_case(name, "the device does not expose this entry point");
+                continue;
+            }
+            check(hr == E_INVALIDARG && res == nullptr, "%s returns E_INVALIDARG and null hr=0x%08lx", what, ul(hr));
+            if (hr == S_OK && res) res->Release();
+        }
+    }
+    if (upload) upload->Release();
+    heap->Release();
 }
 
 /* CreatePlacedResource1 must accept a heap from CreateHeap. CreatePlacedResource2
@@ -1348,7 +1508,9 @@ int main() {
     if (placed_buf) placed_buf->Release();
 
     if (mapped && backing && have_log) {
-        check_placed_heap_charge(device, log_path, region_base, cfg->title_memory_limit_bytes);
+        for (int entry = 0; entry < 3; ++entry) {
+            check_placed_heap_charge(device, log_path, region_base, cfg->title_memory_limit_bytes, entry);
+        }
     }
 
     if (device) {
@@ -1399,6 +1561,7 @@ int main() {
      * section. There is no timing stress test for those windows.
      */
     check_newer_placement(device);
+    check_ordinary_placement(device);
 
     uint64_t host_before = 0;
     uint64_t host_ignored = 0;

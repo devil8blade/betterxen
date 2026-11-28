@@ -31,11 +31,18 @@
  * vkd3d on CrossOver 26.2 faults on that pointer with or without this shim.
  * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createheap
  *
- * CreatePlacedResource forwards the caller's parameters to the host.
- * On the backing heap the offset must be a multiple of the alignment
- * GetResourceAllocationInfo reports, the resource
- * must fit, and an upload or readback heap (not this CUSTOM heap) must use the
- * initial state Microsoft Learn requires:
+ * CreatePlacedResource, CreatePlacedResource1 and CreatePlacedResource2 share one
+ * path (create_placed_common) and check every heap, not only the backing heap,
+ * before the host call: heap and desc are non-null, a buffer has no clear value,
+ * the offset is a multiple of the alignment GetResourceAllocationInfo (or
+ * GetResourceAllocationInfo2 for the DESC1 entry points) reports, and the
+ * resource fits in the heap. CreatePlacedResource and CreatePlacedResource1 also
+ * require the initial state Microsoft Learn gives for an upload or readback heap;
+ * CreatePlacedResource2 takes a barrier layout, which is not checked. A failure
+ * returns E_INVALIDARG with *out null and is logged. Research register A-7
+ * recorded the host accepting an invalid placement, so this check is not left
+ * to the host. A shim heap is unwrapped for the host call and retained by the
+ * resource on all three paths:
  * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createplacedresource
  * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-getresourceallocationinfo
  * Heap alignment values 0, 64 KiB and 4 MiB, and ID3D12Heap1:
@@ -563,41 +570,6 @@ HRESULT host_private_heap(BxDeviceProxy* self, const D3D12_HEAP_DESC* desc, REFI
     return hr;
 }
 
-bool is_backing_heap(ID3D12Heap* heap) {
-    if (!heap) {
-        return false;
-    }
-    BxChargedHeap* backing = nullptr;
-    {
-        Guard guard(g_section);
-        backing = g_record.backing;
-        if (!backing) {
-            return false;
-        }
-        backing->AddRef();
-    }
-    IUnknown* want = nullptr;
-    IUnknown* got = nullptr;
-    const HRESULT want_hr = backing->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&want));
-    const HRESULT got_hr = heap->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&got));
-    const bool same = SUCCEEDED(want_hr) && SUCCEEDED(got_hr) && want == got;
-    if (want) {
-        want->Release();
-    }
-    if (got) {
-        got->Release();
-    }
-    backing->Release();
-    return same;
-}
-
-void log_placed(UINT64 offset, HRESULT hr) {
-    char detail[160];
-    std::snprintf(detail, sizeof(detail), "CreatePlacedResource offset=%llu hr=0x%08lx",
-                  static_cast<unsigned long long>(offset), static_cast<unsigned long>(hr));
-    bx_log_emit(FAILED(hr) ? BX_LOG_WARN : BX_LOG_INFO, "d3d12_xs", "placed_resource", detail);
-}
-
 HRESULT STDMETHODCALLTYPE create_heap(BxDeviceProxy* self, const D3D12_HEAP_DESC* desc, REFIID riid, void** out) {
     BX_D3D_TRACE("ID3D12Device", "CreateHeap");
     if (!self || !self->h_ID3D12Device) {
@@ -627,32 +599,95 @@ HRESULT STDMETHODCALLTYPE create_heap(BxDeviceProxy* self, const D3D12_HEAP_DESC
     return host_private_heap(self, desc, riid, out, true);
 }
 
-HRESULT validate_backing_placement(ID3D12Device* device, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC* desc,
-                                   D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear) {
-    if (!heap || !desc) {
+/* The inputs that differ between CreatePlacedResource, CreatePlacedResource1 and
+   CreatePlacedResource2. `state` is null for CreatePlacedResource2, which takes a
+   barrier layout instead of a resource state. */
+struct Placement {
+    const char* method;
+    ID3D12Heap* heap;
+    UINT64 offset;
+    D3D12_RESOURCE_DIMENSION dimension;
+    const D3D12_CLEAR_VALUE* clear;
+    const D3D12_RESOURCE_STATES* state;
+    D3D12_RESOURCE_ALLOCATION_INFO info;
+};
+
+/* Runs on every heap: the backing heap, a heap from CreateHeap, or a host heap the
+   caller passes directly. The heap desc is read from the host heap; BxChargedHeap
+   forwards GetDesc to the same object. */
+HRESULT validate_placement(const Placement& p) {
+    if (p.dimension == D3D12_RESOURCE_DIMENSION_BUFFER && p.clear) {
         return E_INVALIDARG;
     }
-    if (desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER && clear) {
+    D3D12_HEAP_DESC heap_desc = bx_unwrap(p.heap)->GetDesc();
+    if (p.state) {
+        if (heap_desc.Properties.Type == D3D12_HEAP_TYPE_UPLOAD && *p.state != D3D12_RESOURCE_STATE_GENERIC_READ) {
+            return E_INVALIDARG;
+        }
+        if (heap_desc.Properties.Type == D3D12_HEAP_TYPE_READBACK && *p.state != D3D12_RESOURCE_STATE_COPY_DEST) {
+            return E_INVALIDARG;
+        }
+    }
+    if (p.info.SizeInBytes == 0 || p.info.SizeInBytes == ~0ull) {
         return E_INVALIDARG;
     }
-    D3D12_HEAP_DESC heap_desc = heap->GetDesc();
-    if (heap_desc.Properties.Type == D3D12_HEAP_TYPE_UPLOAD && state != D3D12_RESOURCE_STATE_GENERIC_READ) {
+    if (p.info.Alignment != 0 && (p.offset % p.info.Alignment) != 0) {
         return E_INVALIDARG;
     }
-    if (heap_desc.Properties.Type == D3D12_HEAP_TYPE_READBACK && state != D3D12_RESOURCE_STATE_COPY_DEST) {
-        return E_INVALIDARG;
-    }
-    D3D12_RESOURCE_ALLOCATION_INFO info = device->GetResourceAllocationInfo(0, 1, desc);
-    if (info.SizeInBytes == 0 || info.SizeInBytes == ~0ull) {
-        return E_INVALIDARG;
-    }
-    if (info.Alignment != 0 && (offset % info.Alignment) != 0) {
-        return E_INVALIDARG;
-    }
-    if (offset > heap_desc.SizeInBytes || info.SizeInBytes > heap_desc.SizeInBytes - offset) {
+    if (p.offset > heap_desc.SizeInBytes || p.info.SizeInBytes > heap_desc.SizeInBytes - p.offset) {
         return E_INVALIDARG;
     }
     return S_OK;
+}
+
+void log_placed(const char* method, UINT64 offset, HRESULT hr) {
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "%s offset=%llu hr=0x%08lx", method, static_cast<unsigned long long>(offset),
+                  static_cast<unsigned long>(hr));
+    bx_log_emit(FAILED(hr) ? BX_LOG_WARN : BX_LOG_INFO, "d3d12_xs", "placed_resource", detail);
+}
+
+/*
+ * The one placement path for slots 29, 70 and 77. `p.heap` and `desc` are already
+ * known non-null; `p.info` comes from the matching GetResourceAllocationInfo call.
+ * `host_call(host_heap)` performs the host Create call with the unwrapped heap.
+ */
+template <typename HostCall>
+HRESULT create_placed_common(const Placement& p, void** out, HostCall&& host_call) {
+    const HRESULT check_hr = validate_placement(p);
+    if (FAILED(check_hr)) {
+        log_placed(p.method, p.offset, check_hr);
+        return check_hr;
+    }
+    ID3D12Heap* host_heap = bx_unwrap(p.heap);
+    HRESULT hr = host_call(host_heap);
+    if (SUCCEEDED(hr) && out && *out && host_heap != p.heap) {
+        /* The resource owns a reference to the shim heap through its host
+           object's private data, including across QueryInterface calls. */
+        auto* created = static_cast<IUnknown*>(*out);
+        ID3D12Object* object = nullptr;
+        HRESULT retain_hr = created->QueryInterface(__uuidof(ID3D12Object), reinterpret_cast<void**>(&object));
+        if (SUCCEEDED(retain_hr)) {
+            retain_hr = object->SetPrivateDataInterface(kPlacedResourceHeap, p.heap);
+            object->Release();
+        }
+        if (FAILED(retain_hr)) {
+            created->Release();
+            *out = nullptr;
+            hr = retain_hr;
+        }
+    }
+    log_placed(p.method, p.offset, hr);
+    return hr;
+}
+
+/* Null heap or desc never reaches the host. */
+HRESULT reject_null_placement(const char* method, ID3D12Heap* heap, const void* desc, UINT64 offset) {
+    if (heap && desc) {
+        return S_OK;
+    }
+    log_placed(method, offset, E_INVALIDARG);
+    return E_INVALIDARG;
 }
 
 HRESULT STDMETHODCALLTYPE create_placed(BxDeviceProxy* self, ID3D12Heap* heap, UINT64 offset,
@@ -669,34 +704,63 @@ HRESULT STDMETHODCALLTYPE create_placed(BxDeviceProxy* self, ID3D12Heap* heap, U
     if (out) {
         *out = nullptr;
     }
-    if (is_backing_heap(heap)) {
-        const HRESULT check_hr = validate_backing_placement(self->h_ID3D12Device, heap, offset, desc, state, clear);
-        if (FAILED(check_hr)) {
-            log_placed(offset, check_hr);
-            return check_hr;
-        }
+    const char* method = "CreatePlacedResource";
+    const HRESULT null_hr = reject_null_placement(method, heap, desc, offset);
+    if (FAILED(null_hr)) {
+        return null_hr;
     }
-    ID3D12Heap* host_heap = bx_unwrap(heap);
-    HRESULT hr = self->h_ID3D12Device->CreatePlacedResource(host_heap, offset, desc, state, clear, riid, out);
-    if (SUCCEEDED(hr) && out && *out && host_heap != heap) {
-        /* The resource owns a reference to the shim heap through its host
-           object's private data, including across QueryInterface calls. */
-        auto* created = static_cast<IUnknown*>(*out);
-        ID3D12Object* object = nullptr;
-        HRESULT retain_hr = created->QueryInterface(__uuidof(ID3D12Object), reinterpret_cast<void**>(&object));
-        if (SUCCEEDED(retain_hr)) {
-            retain_hr = object->SetPrivateDataInterface(kPlacedResourceHeap, heap);
-            object->Release();
-        }
-        if (FAILED(retain_hr)) {
-            created->Release();
-            *out = nullptr;
-            hr = retain_hr;
-        }
-    }
-    log_placed(offset, hr);
-    return hr;
+    ID3D12Device* device = self->h_ID3D12Device;
+    const Placement p{method, heap, offset, desc->Dimension, clear, &state, device->GetResourceAllocationInfo(0, 1, desc)};
+    return create_placed_common(p, out, [&](ID3D12Heap* host_heap) {
+        return device->CreatePlacedResource(host_heap, offset, desc, state, clear, riid, out);
+    });
 }
+
+} // namespace
+
+HRESULT bx_vmem_create_placed_resource1(ID3D12Device8* host, ID3D12Heap* heap, UINT64 offset,
+                                        const D3D12_RESOURCE_DESC1* desc, D3D12_RESOURCE_STATES state,
+                                        const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
+    if (out) {
+        *out = nullptr;
+    }
+    const char* method = "CreatePlacedResource1";
+    const HRESULT null_hr = reject_null_placement(method, heap, desc, offset);
+    if (FAILED(null_hr)) {
+        return null_hr;
+    }
+    const Placement p{method, heap, offset, desc->Dimension, clear, &state,
+                      host->GetResourceAllocationInfo2(0, 1, desc, nullptr)};
+    return create_placed_common(p, out, [&](ID3D12Heap* host_heap) {
+        return host->CreatePlacedResource1(host_heap, offset, desc, state, clear, riid, out);
+    });
+}
+
+/* The initial barrier layout is not checked against the heap type: only the
+   resource-state rule for UPLOAD and READBACK heaps is applied, on the other two
+   entry points. Allocation info comes from GetResourceAllocationInfo2, which
+   does not take the castable-format list (GetResourceAllocationInfo3 is on
+   ID3D12Device12, past this proxy's ID3D12Device10). */
+HRESULT bx_vmem_create_placed_resource2(ID3D12Device10* host, ID3D12Heap* heap, UINT64 offset,
+                                        const D3D12_RESOURCE_DESC1* desc, D3D12_BARRIER_LAYOUT layout,
+                                        const D3D12_CLEAR_VALUE* clear, UINT32 num_castable, DXGI_FORMAT* castable,
+                                        REFIID riid, void** out) {
+    if (out) {
+        *out = nullptr;
+    }
+    const char* method = "CreatePlacedResource2";
+    const HRESULT null_hr = reject_null_placement(method, heap, desc, offset);
+    if (FAILED(null_hr)) {
+        return null_hr;
+    }
+    const Placement p{method, heap, offset, desc->Dimension, clear, nullptr,
+                      host->GetResourceAllocationInfo2(0, 1, desc, nullptr)};
+    return create_placed_common(p, out, [&](ID3D12Heap* host_heap) {
+        return host->CreatePlacedResource2(host_heap, offset, desc, layout, clear, num_castable, castable, riid, out);
+    });
+}
+
+namespace {
 
 struct ConfigHeader {
     uint32_t magic;
