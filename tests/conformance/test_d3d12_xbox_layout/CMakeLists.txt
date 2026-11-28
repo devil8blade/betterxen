@@ -1,0 +1,3 @@
+add_executable(test_d3d12_xbox_layout main.cpp)
+target_compile_definitions(test_d3d12_xbox_layout PRIVATE WIDL_EXPLICIT_AGGREGATE_RETURNS)
+target_link_libraries(test_d3d12_xbox_layout PRIVATE d3d12_xs kernel32 uuid)

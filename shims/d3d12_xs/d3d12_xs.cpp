@@ -1,5 +1,6 @@
 #include "proxy.h"
 #include "vmem.h"
+#include "xbox_facade.h"
 
 #include <cstdio>
 #include <cstring>
@@ -117,8 +118,28 @@ HRESULT WINAPI D3D12XboxCreateDevice(PVOID adapter, const void* params, REFIID r
                   adapter ? "non-null (ignored, default host adapter)" : "default", g_bx_trace_d3d);
     bx_log_emit(BX_LOG_INFO, "d3d12_xs", "D3D12XboxCreateDevice", detail);
 
+    /*
+     * ADR 0009: a title built against the Xbox header calls through Xbox-order function tables,
+     * so it gets an Xbox-layout device over the PC proxy. The documentation requires titles to
+     * set Version (D3D12_SDK_VERSION); BetterXen's synthetic fixtures, which are PC-layout
+     * clients built against <d3d12.h>, pass a zeroed block and keep the PC proxy.
+     */
+    if (version != 0 && bx_xbox_iface_for(riid) == &bx_xbox_Device) {
+        void* pc = nullptr;
+        hr = proxy->QueryInterface(riid, &pc);
+        proxy->Release();
+        if (FAILED(hr) || !pc) return FAILED(hr) ? hr : E_NOINTERFACE;
+        *ppv = bx_xbox_wrap(riid, pc);
+        bx_log_emit(BX_LOG_INFO, "d3d12_xs", "xbox_layout", *ppv ? "device=xbox_function_tables" : "device=wrap_failed");
+        return *ppv ? S_OK : E_OUTOFMEMORY;
+    }
     hr = proxy->QueryInterface(riid, ppv);
     proxy->Release();
+    if (SUCCEEDED(hr)) {
+        bx_log_emit(BX_LOG_INFO, "d3d12_xs", "xbox_layout",
+                    version == 0 ? "device=pc_layout (params Version 0: synthetic PC-layout client)"
+                                 : "device=pc_layout (interface has no Xbox table)");
+    }
     return hr;
 }
 

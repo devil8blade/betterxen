@@ -16,6 +16,7 @@
 - [ADR 0006: Retire in-tree native-first workspace](adr/0006-retire-in-tree-native-workspace.md) — Retirement of paused native code/scripts/docs from `main` (preserved at Git tag `native-first-final`).
 - [ADR 0007: API-set win32_bridge shims under CrossOver](adr/0007-api-set-shims-under-crossover.md) — Accepted: CrossOver answers the six API-set import names itself, so the shims are not loaded for static imports.
 - [ADR 0008: M2 Shader Format Gate](adr/0008-m2-shader-format-gate.md) — Proposed: Branch D1 (DXIL through D3DMetal, with the measured wave64 and 64-bit-atomic gaps as M3 work); ACCC-only containers refused with `E_NOTIMPL` until a lawful format source exists.
+- [ADR 0009: Xbox-layout D3D12 objects](adr/0009-xbox-layout-d3d12-objects.md) — Proposed: `d3d12_xs` gives titles objects with the Xbox object layout and function-table order (generated from the Xbox header), hosting the PC proxies; Phase 1 covers the device chain and the objects it creates.
 
 ## Research, Testing & Licensing
 
