@@ -9,7 +9,8 @@
  *     with no object and no call reaching the host device;
  *  3. creates PSOs from the #453 [WaveSize(64)] and 64-bit typed-atomic blobs and requires the
  *     gate to log their constraints;
- *  4. checks the structured `shader_gate` JSONL records.
+ *  4. checks the structured `shader_gate` JSONL records, including the field order and
+ *     space-free values bx-telemetry's key=value parser relies on (#535).
  *
  * It then runs a copy of itself with --no-bridge from a directory holding d3d12_xs.dll but not
  * the bridge, which must still run DXIL and refuse ACCC-only with E_NOTIMPL.
@@ -138,6 +139,51 @@ bool log_has(const std::string& log, std::initializer_list<const char*> needles)
         start = end + 1;
     }
     return false;
+}
+
+/* Every JSONL line whose text holds `needle`, so shape checks can loop over
+ * the records the shim actually wrote rather than the lines typed by hand in
+ * the trace-summary fixtures. */
+std::vector<std::string> log_lines_with(const std::string& log, const char* needle) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start < log.size()) {
+        size_t end = log.find('\n', start);
+        if (end == std::string::npos) end = log.size();
+        const std::string line = log.substr(start, end - start);
+        if (line.find(needle) != std::string::npos) lines.push_back(line);
+        start = end + 1;
+    }
+    return lines;
+}
+
+/* The `detail` value of one JSONL line, or empty when there is none. */
+std::string detail_of(const std::string& line) {
+    const char* key = "\"detail\":\"";
+    const size_t at = line.find(key);
+    if (at == std::string::npos) return {};
+    const size_t begin = at + std::strlen(key);
+    size_t end = begin;
+    while (end < line.size() && !(line[end] == '"' && line[end - 1] != '\\')) ++end;
+    return line.substr(begin, end - begin);
+}
+
+/* The structured part of a `shader_gate` detail: everything before the first
+ * token that has no `=`. The gap record ends in prose, so it stops there. */
+std::vector<std::string> structured_tokens(const std::string& detail, bool stop_at_free_text) {
+    std::vector<std::string> tokens;
+    size_t i = 0;
+    while (i < detail.size()) {
+        while (i < detail.size() && detail[i] == ' ') ++i;
+        if (i >= detail.size()) break;
+        size_t end = detail.find(' ', i);
+        if (end == std::string::npos) end = detail.size();
+        const std::string token = detail.substr(i, end - i);
+        if (token.find('=') == std::string::npos && stop_at_free_text) break;
+        tokens.push_back(token);
+        i = end;
+    }
+    return tokens;
 }
 
 ID3D12RootSignature* make_root(ID3D12Device* device, const D3D12_ROOT_PARAMETER& param) {
@@ -566,6 +612,81 @@ int main() {
 
     // 5. The JSONL records.
     const std::string log = read_log();
+    // The trace-summary fixtures in bx-telemetry/bx-cli are typed by hand from
+    // reading shader_gate.cpp. These checks pin the shape the parser assumes,
+    // against the log this fixture actually wrote, so the two cannot drift
+    // apart silently (#535).
+    {
+        const std::vector<std::string> gate_lines = log_lines_with(log, "\"event\":\"shader_gate\"");
+        check(!gate_lines.empty(), "the fixture wrote at least one shader_gate record");
+
+        bool order_ok = true;
+        bool classified_has_kind = true;
+        bool unclassified_lacks_kind = true;
+        bool values_have_no_space = true;
+        for (const std::string& line : gate_lines) {
+            const std::string detail = detail_of(line);
+            const size_t pso = detail.find("pso=");
+            const size_t stage = detail.find("stage=");
+            const size_t decision = detail.find("decision=");
+            const size_t hr = detail.find("hr=");
+            // The summarizer extracts these by key, so the order the emitter
+            // writes them is the order it relies on. Every key must be present:
+            // a missing one is npos, the largest value, which would satisfy `<`.
+            const bool all_present = pso != std::string::npos && stage != std::string::npos &&
+                                     decision != std::string::npos && hr != std::string::npos;
+            if (!(all_present && pso < stage && stage < decision && decision < hr)) {
+                order_ok = false;
+            }
+            const bool unclassified = detail.find("unclassified") != std::string::npos;
+            const bool has_kind = detail.find("kind=") != std::string::npos;
+            /* A record with an inspection always logs a kind; the no-bridge records
+             * (`*_unclassified`) and `pass_uninspected` have none. */
+            const bool classified = !unclassified &&
+                                    (detail.find("decision=pass_dxil") != std::string::npos ||
+                                     detail.find("decision=reject_accc_only") != std::string::npos ||
+                                     detail.find("decision=pass_original") != std::string::npos ||
+                                     detail.find("decision=prepare_failed") != std::string::npos ||
+                                     detail.find("decision=copy_limit") != std::string::npos);
+            if (unclassified && has_kind) unclassified_lacks_kind = false;
+            if (classified && !has_kind) classified_has_kind = false;
+            for (const std::string& token : structured_tokens(detail, false)) {
+                if (token.find('=') == std::string::npos) values_have_no_space = false;
+            }
+        }
+        check(order_ok, "every shader_gate record writes pso, stage, decision, hr in that order");
+        check(classified_has_kind, "a classified shader_gate record carries kind=");
+        check(unclassified_lacks_kind, "an unclassified record carries no kind=");
+        check(values_have_no_space,
+              "no key=value in a shader_gate record is split by a space, which is what "
+              "parse_key_values(..., false) assumes");
+
+        const std::vector<std::string> gap_lines = log_lines_with(log, "\"event\":\"shader_d3dmetal_gap\"");
+        check(!gap_lines.empty(), "the fixture wrote at least one gap record");
+        bool gap_ok = true;
+        bool gap_values_have_no_space = true;
+        for (const std::string& line : gap_lines) {
+            const std::string detail = detail_of(line);
+            if (detail.find("pso=") == std::string::npos ||
+                detail.find("stage=") == std::string::npos ||
+                detail.find("wave_lanes_min=") == std::string::npos ||
+                detail.find(':') == std::string::npos) {
+                gap_ok = false;
+            }
+            // parse_key_values(..., true) stops at the first token without
+            // '=', so every structured token must be a key=value pair.
+            for (const std::string& token : structured_tokens(detail, true)) {
+                if (token.find('=') == std::string::npos) gap_values_have_no_space = false;
+            }
+        }
+        check(gap_ok,
+              "every gap record carries pso=, stage=, wave_lanes_min= and the colon "
+              "that ends its structured part");
+        check(gap_values_have_no_space,
+              "no key=value in a gap record's structured part is split by a space, which is "
+              "what parse_key_values(..., true) assumes");
+    }
+
     char fill_bytes[32];
     std::snprintf(fill_bytes, sizeof(fill_bytes), "bytes=%u ", static_cast<unsigned>(sizeof(g_fill_cs66)));
     check(log_has(log, {"\"event\":\"shader_gate\"", "pso=compute", "decision=pass_dxil", "kind=dxil", "sm=6.6",

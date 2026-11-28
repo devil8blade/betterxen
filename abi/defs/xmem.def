@@ -15,3 +15,5 @@ EXPORTS
     XMemVirtualQuery
     bx_xmem_query_region
     bx_xmem_get_internal_stats
+    bx_xmem_try_charge_external
+    bx_xmem_release_charge_external

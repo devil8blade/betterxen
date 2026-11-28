@@ -1,5 +1,6 @@
 //! Track A (M1-A1): Native ARM64 macOS CLI for BetterXen hybrid execution.
 
+mod drives;
 mod stage;
 mod supervise;
 
@@ -40,18 +41,16 @@ const HOST_ENV_ALLOWLIST: &[&str] = &[
     "XPC_SERVICE_NAME",
 ];
 
-fn print_usage() {
-    eprintln!(
-        "BetterXen Hybrid CLI (bx-cli)\n\
-         \n\
-         Usage:\n\
-           bx-cli doctor                         Inspect Apple Silicon host, Rosetta 2, CrossOver & mingw-w64\n\
-           bx-cli probe <pe32+_path>             Classify PE32+ imports by BetterXen track (A-E)\n\
-           bx-cli shader <dxbc_blob_path>        Classify a DXBC shader container (DXIL vs ACCC/FSPX)\n\
-           bx-cli trace <log.jsonl>              Summarize bx_runtime_veh JSONL diagnostics\n\
-           bx-cli run --exe <path> [--shims <dir>] [--bottle <name> | --prefix <dir>] [--profile lockhart|anaconda] [--log <path>] [--inherit-env] [--timeout <secs>] [--backend d3dmetal|dxmt|dxvk|wined3d (needs --bottle)]\n\
-           (shims default to build-shims/bin; a timeout or signal stops the whole bottle or prefix)\n"
-    );
+fn usage_text() -> &'static str {
+    "BetterXen Hybrid CLI (bx-cli)\n\
+     \n\
+     Usage:\n\
+       bx-cli doctor                         Inspect Apple Silicon host, Rosetta 2, CrossOver & mingw-w64\n\
+       bx-cli probe <pe32+_path>             Classify PE32+ imports by BetterXen track (A-E)\n\
+       bx-cli shader <dxbc_blob_path>        Classify a DXBC shader container (DXIL vs ACCC/FSPX)\n\
+       bx-cli trace <log.jsonl>              Summarize bx_runtime_veh JSONL diagnostics\n\
+       bx-cli run --exe <path> [--shims <dir>] [--bottle <name> | --prefix <dir>] [--profile lockhart|anaconda] [--log <path>] [--inherit-env] [--timeout <secs>] [--backend d3dmetal|dxmt|dxvk|wined3d (needs --bottle)]\n\
+       (shims default to build-shims/bin; a timeout or signal stops the whole bottle or prefix)\n"
 }
 
 fn run_capture(program: &str, args: &[&str]) -> Option<String> {
@@ -860,6 +859,18 @@ fn cmd_run(args: &[String]) -> ExitCode {
     supervise::install_signal_handlers();
     let started = Instant::now();
 
+    // Drive links are prefix-global. Keep them stable until this guest exits so another bx-cli
+    // process cannot retarget G: underneath a running title. Taken before system32 staging, so
+    // a run refused here has not touched the shared prefix. Runs sharing a prefix are therefore
+    // serial: a second launcher on the same prefix is refused while the first is running.
+    let _drive_lock = match drives::lock_drive_mappings(&environment_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            diag(format_args!("error: {e}"));
+            return ExitCode::FAILURE;
+        }
+    };
+
     // #457: shims loaded with LOAD_LIBRARY_SEARCH_SYSTEM32 never see WINEPATH, so they are
     // copied into the environment's system32 first. A bare prefix is initialized for that.
     let system32 = stage::system32_dir(&environment_dir);
@@ -919,6 +930,25 @@ fn cmd_run(args: &[String]) -> ExitCode {
             ));
             return ExitCode::FAILURE;
         }
+    }
+
+    // An Xbox title opens its package on G: and writes temporary files to T:. A missing drive
+    // only matters to such a title, so it is reported and the run goes on.
+    match abs_exe.parent() {
+        Some(package_dir) => match drives::map_xbox_drives(&environment_dir, package_dir) {
+            Ok(mappings) => {
+                for mapping in &mappings {
+                    match mapping {
+                        drives::Mapping::Foreign { .. } => diag(mapping.describe()),
+                        _ => diag(format_args!("bx-cli: {}", mapping.describe())),
+                    }
+                }
+            }
+            Err(e) => diag(format_args!(
+                "warning: Xbox drives G: and T: not mapped: {e}"
+            )),
+        },
+        None => diag("warning: Xbox drive G: not mapped: the executable has no parent directory"),
     }
 
     let mut cmd = if let Some(ref bname) = bottle {
@@ -1091,22 +1121,66 @@ fn cmd_shader(path: &str) -> ExitCode {
     }
 }
 
+/// What a bare invocation of `bx-cli` should do. Split out from `main` so the
+/// choice is testable without spawning a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dispatch<'a> {
+    /// An explicit `--help` / `-h` / `help`: usage on stdout, succeed.
+    Help,
+    /// Nothing was asked for: usage on stderr, fail as a usage error.
+    NoArgs,
+    /// An unrecognised subcommand: usage on stderr, fail.
+    Unknown(&'a str),
+    /// A real subcommand.
+    Sub(&'a str),
+}
+
+impl<'a> Dispatch<'a> {
+    fn classify(args: &'a [String]) -> Self {
+        let Some(sub) = args.first() else {
+            return Dispatch::NoArgs;
+        };
+        match sub.as_str() {
+            "--help" | "-h" | "help" => Dispatch::Help,
+            "doctor" | "probe" | "shader" | "trace" | "run" => Dispatch::Sub(sub.as_str()),
+            _ => Dispatch::Unknown(sub.as_str()),
+        }
+    }
+
+    /// True when the usage text goes to stdout rather than stderr.
+    fn usage_on_stdout(self) -> bool {
+        matches!(self, Dispatch::Help)
+    }
+
+    /// True when the invocation must not report success.
+    fn is_usage_error(self) -> bool {
+        matches!(self, Dispatch::NoArgs | Dispatch::Unknown(_))
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let Some(sub) = args.first() else {
-        print_usage();
-        return ExitCode::SUCCESS;
-    };
-    match sub.as_str() {
-        "doctor" => cmd_doctor(),
-        "probe" if args.len() >= 2 => cmd_probe(&args[1]),
-        "shader" if args.len() >= 2 => cmd_shader(&args[1]),
-        "trace" if args.len() >= 2 => cmd_trace(&args[1]),
-        "run" => cmd_run(&args[1..]),
-        _ => {
-            print_usage();
-            ExitCode::FAILURE
-        }
+    let dispatch = Dispatch::classify(&args);
+    if dispatch.usage_on_stdout() {
+        print!("{}", usage_text());
+    } else if dispatch.is_usage_error() {
+        eprint!("{}", usage_text());
+    }
+    match dispatch {
+        Dispatch::Help => ExitCode::SUCCESS,
+        Dispatch::NoArgs | Dispatch::Unknown(_) => ExitCode::FAILURE,
+        Dispatch::Sub(sub) => match sub {
+            "doctor" => cmd_doctor(),
+            "probe" if args.len() >= 2 => cmd_probe(&args[1]),
+            "shader" if args.len() >= 2 => cmd_shader(&args[1]),
+            "trace" if args.len() >= 2 => cmd_trace(&args[1]),
+            "run" => cmd_run(&args[1..]),
+            // Only reachable when a subcommand that needs an argument got none.
+            _ => {
+                eprint!("{}", usage_text());
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 
@@ -1704,6 +1778,63 @@ sub setup_bottle_wineprefix {
         assert!(rendered.contains("shader_gate records : 2"), "{rendered}");
         assert!(rendered.contains("unparsed details    : 1"), "{rendered}");
         assert!(rendered.contains("    1x  pass_dxil"), "{rendered}");
+    }
+
+    /// The usage paths must not be inverted: an explicit `--help` succeeded,
+    /// a bare invocation did nothing, and an unknown subcommand is an error.
+    #[test]
+    fn help_succeeds_on_stdout_and_a_bare_invocation_is_a_usage_error() {
+        for flag in ["--help", "-h", "help"] {
+            let argv = args(&[flag]);
+            let dispatch = Dispatch::classify(&argv);
+            assert_eq!(
+                dispatch,
+                Dispatch::Help,
+                "{flag} is an explicit help request"
+            );
+            assert!(dispatch.usage_on_stdout(), "{flag} prints usage on stdout");
+            assert!(!dispatch.is_usage_error(), "{flag} must exit 0");
+        }
+
+        let empty: Vec<String> = Vec::new();
+        let none = Dispatch::classify(&empty);
+        assert_eq!(none, Dispatch::NoArgs);
+        assert!(!none.usage_on_stdout(), "a bare invocation writes stderr");
+        assert!(
+            none.is_usage_error(),
+            "a bare invocation did nothing, so it must not report success"
+        );
+
+        let bogus_argv = args(&["definitely-not-a-subcommand"]);
+        let bogus = Dispatch::classify(&bogus_argv);
+        assert_eq!(bogus, Dispatch::Unknown("definitely-not-a-subcommand"));
+        assert!(
+            !bogus.usage_on_stdout(),
+            "an unknown subcommand writes stderr"
+        );
+        assert!(bogus.is_usage_error(), "an unknown subcommand is an error");
+
+        for real in ["doctor", "probe", "shader", "trace", "run"] {
+            let argv = args(&[real]);
+            let dispatch = Dispatch::classify(&argv);
+            assert_eq!(dispatch, Dispatch::Sub(real), "{real} is a real subcommand");
+            assert!(!dispatch.usage_on_stdout(), "{real} prints no usage");
+            assert!(!dispatch.is_usage_error(), "{real} is not a usage error");
+        }
+    }
+
+    /// The usage text must name every subcommand, so the classifier above is
+    /// not testing a table that nothing prints.
+    #[test]
+    fn the_usage_text_names_every_subcommand() {
+        let text = usage_text();
+        assert!(
+            text.contains("BetterXen Hybrid CLI"),
+            "usage carries the banner"
+        );
+        for sub in ["doctor", "probe", "shader", "trace", "run"] {
+            assert!(text.contains(sub), "usage documents {sub}");
+        }
     }
 
     /// #590: the grouped view names each `(pso, stage)` pair with its count, wave width and

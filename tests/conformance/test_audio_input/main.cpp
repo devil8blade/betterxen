@@ -9,6 +9,8 @@
 
 extern "C" {
 HRESULT WINAPI AcpHalCreate(void**);
+HRESULT WINAPI AcpHalAllocateShapeContexts(void*);
+HRESULT WINAPI AcpHalReleaseShapeContexts(void);
 HRESULT WINAPI ApuCreateHeap(uint32_t, uint32_t);
 HRESULT WINAPI ApuAlloc(void**, uint32_t*, uint32_t, uint32_t);
 HRESULT WINAPI ApuFree(void*);
@@ -31,19 +33,60 @@ HRESULT WINAPI XDspDisconnect(void*);
 
 namespace {
 void WINAPI dummy_device_callback(uint64_t, void*, void*, uint64_t, uint32_t, uint32_t) {}
+
+bool file_contains(const char* path, uint64_t offset, const char* needle_a, const char* needle_b) {
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    bool found = false;
+    LARGE_INTEGER size = {};
+    if (GetFileSizeEx(f, &size) && size.QuadPart >= 0 &&
+        offset <= static_cast<uint64_t>(size.QuadPart) &&
+        static_cast<uint64_t>(size.QuadPart) - offset < (64ull << 20)) {
+        LARGE_INTEGER pos{};
+        pos.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(f, pos, nullptr, FILE_BEGIN)) {
+            CloseHandle(f);
+            return false;
+        }
+        const DWORD remaining = static_cast<DWORD>(static_cast<uint64_t>(size.QuadPart) - offset);
+        auto* buf = static_cast<char*>(HeapAlloc(GetProcessHeap(), 0, static_cast<SIZE_T>(remaining) + 1));
+        DWORD total = 0;
+        while (buf && total < remaining) {
+            DWORD got = 0;
+            if (!ReadFile(f, buf + total, remaining - total, &got, nullptr) || got == 0) break;
+            total += got;
+        }
+        if (buf && total == remaining) {
+            buf[total] = '\0';
+            /* Both needles must sit on the same JSONL line. */
+            for (char* line = buf; line && *line && !found;) {
+                char* end = std::strchr(line, '\n');
+                if (end) *end = '\0';
+                found = std::strstr(line, needle_a) && std::strstr(line, needle_b);
+                line = end ? end + 1 : nullptr;
+            }
+        }
+        if (buf) HeapFree(GetProcessHeap(), 0, buf);
+    }
+    CloseHandle(f);
+    return found;
+}
 } // namespace
 
 
 // Read the JSONL log the shim wrote, so the dispatcher's live-reference
 // count can be checked rather than assumed. The log is the only place the
-// count is observable: `Release` returning 0 proves the count reached zero,
-// not that the object was freed. Removing `delete this` would leave the
-// count correct while leaking, so this assertion is what catches it.
+// count is observable: `Release` returning 0 proves the reference count
+// reached zero, and the `dispatch_mode` lines prove the live-dispatcher
+// counter followed it. They do not prove the object was freed: `Release`
+// updates the counter before `delete this`, so a leak would not show here.
 // `bx-cli run` appends to the supplied BX_LOG_FILE, so a re-run with the
 // same log can pass from stale lines even if this run emits none. Capture
 // the file's size before the run and assert only on the bytes appended by
-// this run. This works whether the log path came from the runner or from
-// the temp file the fixture creates below.
+// this run.
 static uint64_t log_file_size(const char* path) {
     if (!path || !*path) return 0;
     HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -77,19 +120,17 @@ static std::string read_log_file_from(const char* path, uint64_t offset) {
 }
 
 int main() {
-        // `bx-cli run` sets BX_LOG_FILE for the guest. When the fixture is
-        // run directly there is no such variable, so create a temp log and
-        // point the shim at it; otherwise the assertions below would read an
-        // empty file and fail for the wrong reason.
-        char log_path[MAX_PATH]{};
-        DWORD n = GetEnvironmentVariableA("BX_LOG_FILE", log_path, sizeof(log_path));
-        if (n == 0 || n >= sizeof(log_path)) {
-            char temp_dir[MAX_PATH]{};
-            CHECK(GetTempPathA(sizeof(temp_dir), temp_dir) > 0);
-            CHECK(GetTempFileNameA(temp_dir, "bxg", 0, log_path) != 0);
-            CHECK(SetEnvironmentVariableA("BX_LOG_FILE", log_path));
-        }
-        const uint64_t log_start = log_file_size(log_path);
+    // The dispatcher checks below read the shim's JSONL log, so BX_LOG_FILE
+    // must name it before the process starts (`bx-cli run --log`). Setting it
+    // here would be too late: AcpHal.dll imports bx_runtime_veh.dll, which
+    // reads BX_LOG_FILE once in DLL_PROCESS_ATTACH, before main runs.
+    char dispatcher_log_path[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableA("BX_LOG_FILE", dispatcher_log_path, sizeof(dispatcher_log_path));
+    if (n == 0 || n >= sizeof(dispatcher_log_path)) {
+        std::fprintf(stderr, "FAIL: BX_LOG_FILE must be set before launch (run under bx-cli run --log)\n");
+        return 1;
+    }
+    const uint64_t log_start = log_file_size(dispatcher_log_path);
 
     void* object = nullptr;
     CHECK(AcpHalCreate(&object) == S_OK && object);
@@ -98,6 +139,10 @@ int main() {
     CHECK(hal->Release() == 1);
     void *va = nullptr, *second = nullptr;
     uint32_t base = 0, other = 0;
+    CHECK(ApuAlloc(&va, &base, 64, 64) == E_OUTOFMEMORY && !va && !base);
+    // A zero-capacity heap must not report S_OK: it can never satisfy an
+    // allocation (#580). ApuAlloc still refuses with E_OUTOFMEMORY.
+    CHECK(ApuCreateHeap(0, 0) == E_INVALIDARG);
     CHECK(ApuAlloc(&va, &base, 64, 64) == E_OUTOFMEMORY && !va && !base);
     CHECK(ApuCreateHeap(64, 64) == S_OK);
     CHECK(ApuAlloc(&va, nullptr, 64, 64) == S_OK && va);
@@ -121,6 +166,25 @@ int main() {
     CHECK(ApuFree(va) == S_OK && !ApuMapApuAddress(base) && !ApuMapVirtualAddress(va));
     CHECK(ApuFree(va) == E_INVALIDARG && ApuMapApuAddress(other) == second);
     CHECK(ApuFree(second) == S_OK && hal->Release() == 0);
+
+    // AcpHal shape-context stubs: NDA-gated contract, so BetterXen returns
+    // E_NOTIMPL and logs the symbol. Null and sentinel pointers must not crash.
+    CHECK(AcpHalAllocateShapeContexts(nullptr) == E_NOTIMPL);
+    CHECK(AcpHalAllocateShapeContexts(reinterpret_cast<void*>(uintptr_t{0xDEADBEEF})) == E_NOTIMPL);
+    CHECK(AcpHalReleaseShapeContexts() == E_NOTIMPL);
+    CHECK(AcpHalReleaseShapeContexts() == E_NOTIMPL);
+
+    char log_path[MAX_PATH];
+    DWORD log_len = GetEnvironmentVariableA("BX_LOG_FILE", log_path, sizeof(log_path));
+    if (log_len > 0 && log_len < sizeof(log_path)) {
+        CHECK(file_contains(log_path, log_start, "\"event\":\"unimpl_api\"", "AcpHal.dll!AcpHalAllocateShapeContexts"));
+        CHECK(file_contains(log_path, log_start, "\"event\":\"unimpl_api\"", "AcpHal.dll!AcpHalReleaseShapeContexts"));
+    } else {
+        // Unreachable under `bx-cli run --log`. A SKIP that still exits 0 would
+        // contradict the exit-77 protocol, so a missing log is a failure.
+        std::fprintf(stderr, "FAIL: BX_LOG_FILE must be set before launch (run under bx-cli run --log)\n");
+        return 1;
+    }
 
     void *apu = nullptr, *peer = nullptr, *dsp = nullptr;
     CHECK(XApuConnect(&apu) == S_OK && XApuConnect(&peer) == S_OK && peer != apu);
@@ -276,13 +340,12 @@ int main() {
     CHECK(CloseHandle(wait1) && CloseHandle(wait2));
     CHECK(disp_unknown->Release() == 0);
 
-    // The live-dispatcher count is the only observable evidence that the
-    // dispatcher was destroyed: `Release` returning 0 proves the count, not
-    // the deallocation. `dispatch_mode` logs `mode=manual live_dispatchers=N`
-    // on every transition, so a `delete this` removal that leaks the object
-    // would leave `live_dispatchers=1` behind and fail here.
+    // `dispatch_mode` logs each manual/automatic transition with the live
+    // dispatcher count. These checks catch a Release that never calls
+    // `on_dispatcher_released` (no `live_dispatchers=0` line). They cannot
+    // catch a missing `delete this`, which runs after the counter update.
     {
-        const std::string log = read_log_file_from(log_path, log_start);
+        const std::string log = read_log_file_from(dispatcher_log_path, log_start);
         CHECK(log.find("live_dispatchers=1") != std::string::npos);
         CHECK(log.find("live_dispatchers=0") != std::string::npos);
         CHECK(log.find("mode=manual") != std::string::npos);

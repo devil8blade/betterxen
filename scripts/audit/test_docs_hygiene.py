@@ -227,5 +227,70 @@ class CheckLinksTests(unittest.TestCase):
         self.assertEqual(problems, [])
 
 
+class MarkerTests(unittest.TestCase):
+    """The conflict-marker check must catch all four markers, including the diff3 one."""
+
+    def _markers(self, text):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "f.md").write_text(text, encoding="utf-8")
+            previous = docs_hygiene.ROOT
+            docs_hygiene.ROOT = root
+            try:
+                problems = []
+                docs_hygiene.check_markers({"f.md": text}, problems)
+                return problems
+            finally:
+                docs_hygiene.ROOT = previous
+
+    def test_every_marker_kind_is_reported(self):
+        for line in ["<<<<<<< HEAD", "||||||| merged common ancestors", "=======", ">>>>>>> topic"]:
+            problems = self._markers(line + "\n")
+            self.assertEqual(len(problems), 1, f"{line!r} was not reported: {problems}")
+            self.assertIn("f.md:1", problems[0])
+
+    def test_diff3_base_marker_is_reported(self):
+        base = self._markers("||||||| merged common ancestors\n")
+        self.assertEqual(len(base), 1, "the diff3 base marker must be reported")
+        self.assertIn("conflict marker", base[0])
+
+    def test_a_diff3_block_reports_all_four_lines(self):
+        block = "<<<<<<< HEAD\na\n||||||| merged common ancestors\nb\n=======\nc\n>>>>>>> topic\n"
+        problems = self._markers(block)
+        self.assertEqual(len(problems), 4, problems)
+
+    def test_ordinary_content_is_not_a_marker(self):
+        for text in ["| a | b |\n", "||||||\n", "======\n", "prose with | pipes\n", "---\n"]:
+            self.assertEqual(self._markers(text), [], f"{text!r} was wrongly reported")
+
+
+class WorkflowTests(unittest.TestCase):
+    """check_workflows must reject unparseable YAML."""
+
+    def _check(self, text):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "a.yml").write_text(text, encoding="utf-8")
+            previous = docs_hygiene.ROOT
+            docs_hygiene.ROOT = root
+            try:
+                problems = []
+                docs_hygiene.check_workflows({".github/workflows/a.yml": text}, problems, require_yaml=True)
+                return problems
+            finally:
+                docs_hygiene.ROOT = previous
+
+    def test_parses_a_valid_workflow(self):
+        self.assertEqual(self._check("on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n"), [])
+
+    def test_reports_invalid_yaml(self):
+        problems = self._check("on: [push\n")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("a.yml", problems[0])
+
+
 if __name__ == "__main__":
     unittest.main()

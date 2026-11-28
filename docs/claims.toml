@@ -1,4 +1,30 @@
 # Source review is distinct from a Xenora test run.
+#
+# Evidence classes (derived from existing usage; claim classes are unchanged):
+# A — Executed measurement on a named Apple Silicon host, with an independent
+#     CPU/reference expectation. Valid only for the named host/software versions;
+#     implementer-run unless independently reproduced. Never Xbox verification.
+# B — Source-derived semantics from a public vendor specification, scoped to the
+#     documented target (e.g. desktop RDNA 2, public D3D12, Metal/MSL). May be
+#     exercised by synthetic tests, but does not establish console applicability.
+# D — Public documentation or sample-source inspection (Microsoft/Xbox/Apple),
+#     without console execution. Establishes only what the reviewed source states.
+# E — Public tool/format documentation or observed behavior of a public
+#     software tool (e.g. LLVM's gfx1030 documentation, or its assembler/
+#     disassembler accepting gfx1030 forms), scoped to the pinned tool version.
+#     Documentation review and execution are distinct; the claim's test field
+#     records which one applies.
+# U — Unknown/unestablished by the reviewed public sources: a bounded statement
+#     about the evidence reviewed, not proof that no authorized source exists.
+#
+# Use B for semantics from a specification, D for a claim about what a public
+# document or sample says, and E for a claim about a tool or its format support.
+# The current registry does not assign class C.
+#
+# These are the repository's evidence classes. AGENTS.md §5 refers to this
+# file and does not define a second vocabulary; the longer VERIFIED /
+# REPRODUCED / SOURCE-DERIVED / ... vocabulary named in issue #549 is not
+# present in the in-tree AGENTS.md, so no mapping is invented here.
 schema_version = 1
 
 [[claim]]

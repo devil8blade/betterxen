@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[2]
-MARKER = re.compile(r"^(<{7}( |$)|={7}$|>{7}( |$))")
+MARKER = re.compile(r"^(<{7}( |$)|\|{7}( |$)|={7}$|>{7}( |$))")
 LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")

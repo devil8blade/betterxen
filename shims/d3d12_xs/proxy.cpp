@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <type_traits>
 #include <vector>
+
+#include "presentx.h"
 
 #include "shader_gate.h"
 
@@ -685,6 +688,11 @@ HRESULT STDMETHODCALLTYPE BxChildProxy<Gen>::QueryInterface(REFIID riid, void** 
         AddRef();
         *ppv = static_cast<Gen*>(this);
         return S_OK;
+    }
+    if constexpr (std::is_same_v<Gen, BxCommandQueueProxyImpl>) {
+        if (IsEqualGUID(riid, IID_IBxPresentQueue)) {
+            return bx_present_query_queue(this, ppv); /* BetterXen's presentation bridge, presentx.h */
+        }
     }
     return query_host_unproxied(host_identity_, Gen::kLeafName, riid, ppv);
 }

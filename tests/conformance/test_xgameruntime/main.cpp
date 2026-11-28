@@ -739,6 +739,42 @@ int main() {
         size_t cid_used = 0;
         CHECK(SUCCEEDED(get_cid(com_sys, sizeof(cid), cid, &cid_used)) && cid_used > 1);
 
+        // XSystemGetAnalyticsInfo and XDisplayTryEnableHdrMode: called through the same
+        // QueryApiImpl keys and slots the console runtime library uses. Expected values come
+        // from the public XSystem.h / XDisplay.h documentation, not from the shim.
+        {
+            const GUID analytics = {0xB884675D, 0xB738, 0x4A9C, {0x81, 0x5D, 0x9A, 0x9A, 0x1E, 0x0C, 0x6C, 0x9B}};
+            struct Version { uint16_t major, minor, build, revision; };
+            struct AnalyticsInfo { Version os, hosting; char family[64]; char form[64]; };
+            static_assert(sizeof(AnalyticsInfo) == 0x90, "XSystemAnalyticsInfo is 144 bytes");
+            void* com_analytics = nullptr;
+            CHECK(SUCCEEDED(query_api(&analytics, &analytics, &com_analytics)) && com_analytics);
+            auto** av = *static_cast<void***>(com_analytics);
+            auto get_info = reinterpret_cast<AnalyticsInfo*(WINAPI*)(void*, AnalyticsInfo*)>(av[3]);
+            AnalyticsInfo info;
+            std::memset(&info, 0xA5, sizeof(info));
+            CHECK(get_info(com_analytics, &info) == &info);
+            CHECK(std::strcmp(info.family, "Xbox") == 0);
+            CHECK(std::strncmp(info.form, "Xbox Series ", 12) == 0);
+            CHECK(info.os.major == 10 && info.hosting.major == 10);
+            CHECK(std::memchr(info.form, 0, sizeof(info.form)) != nullptr);
+            CHECK(reinterpret_cast<ULONG(WINAPI*)(void*)>(av[2])(com_analytics) >= 1);
+
+            const GUID display_clsid = {0x03F0FE74, 0xFDD9, 0x4E5C, {0xB6, 0x30, 0xF9, 0x33, 0x9C, 0x47, 0xAC, 0xC5}};
+            const GUID display_iid = {0x35F07670, 0x706E, 0x4BFB, {0x94, 0x76, 0x09, 0x07, 0x98, 0xC5, 0xEB, 0xF3}};
+            struct HdrInfo { float min_lum, max_lum, max_full_frame_lum; };
+            void* com_display = nullptr;
+            CHECK(SUCCEEDED(query_api(&display_clsid, &display_iid, &com_display)) && com_display);
+            auto** dv = *static_cast<void***>(com_display);
+            auto try_hdr = reinterpret_cast<uint32_t(WINAPI*)(void*, uint32_t, HdrInfo*)>(dv[4]);
+            HdrInfo hdr{1.0f, 2.0f, 3.0f};
+            // XDisplayHdrModeResult: Unknown 0, Enabled 1, Disabled 2. PreferHdr is 0.
+            CHECK(try_hdr(com_display, 0u, &hdr) == 2u);
+            CHECK(hdr.min_lum == 0.0f && hdr.max_lum == 0.0f && hdr.max_full_frame_lum == 0.0f);
+            CHECK(try_hdr(com_display, 1u, nullptr) == 2u);  // the info pointer is optional
+            CHECK(reinterpret_cast<ULONG(WINAPI*)(void*)>(dv[2])(com_display) >= 1);
+        }
+
         void* com_game = nullptr;
         CHECK(SUCCEEDED(query_api(&game_clsid, &game_iid, &com_game)) && com_game);
         auto** game_vtbl = *static_cast<void***>(com_game);

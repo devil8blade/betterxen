@@ -100,6 +100,55 @@ pub struct ShaderInspection {
     pub chunks: Vec<ChunkInfo>,
 }
 
+impl ShaderInspection {
+    /// Payload of the first chunk tagged `fourcc`, if present and fully
+    /// inside the container. Returns `None` when absent, when the declared
+    /// size would run past `container_size` or `container`, or when `offset`
+    /// points into the DXBC header or chunk-offset table instead of a chunk
+    /// header.
+    ///
+    /// `container` must be the same bytes passed to [`inspect_dxbc`]; the
+    /// inspection only stores chunk metadata, so the original container is
+    /// required to slice out the payload. `ChunkInfo::offset` is relative to
+    /// the start of the `DXBC` container and points at the 8-byte chunk
+    /// header (fourcc + size), so the payload begins at `offset + 8`.
+    ///
+    /// A zero-size chunk yields `Some(&[])`: the header is present and
+    /// in-bounds, so an empty payload is a valid result rather than an
+    /// absence. Callers that require a minimum size must check the returned
+    /// slice length.
+    ///
+    /// Only the already-parsed `self.chunks` table is consulted; the raw
+    /// chunk table is not re-walked. When several chunks share `fourcc`,
+    /// the first one in table order wins, matching the C++ `find_chunk`.
+    pub fn chunk_payload<'a>(&self, container: &'a [u8], fourcc: &[u8; 4]) -> Option<&'a [u8]> {
+        let chunk = self.chunks.iter().find(|c| &c.fourcc == fourcc)?;
+        let table_bytes = u64::try_from(self.chunks.len()).ok()?.checked_mul(4)?;
+        let table_end = 32u64.checked_add(table_bytes)?;
+        if u64::from(chunk.offset) < table_end {
+            return None;
+        }
+        let start = u64::from(chunk.offset).checked_add(8)?;
+        let end = start.checked_add(u64::from(chunk.size))?;
+        if end > u64::from(self.container_size) {
+            return None;
+        }
+        let start = usize::try_from(start).ok()?;
+        let end = usize::try_from(end).ok()?;
+        if end > container.len() {
+            return None;
+        }
+        container.get(start..end)
+    }
+
+    /// True when a chunk header tagged `fourcc` exists, whatever its
+    /// declared size. Mirrors the C++ `has_chunk_tag`: presence without
+    /// trusting the size.
+    pub fn has_chunk_tag(&self, fourcc: &[u8; 4]) -> bool {
+        self.chunks.iter().any(|c| &c.fourcc == fourcc)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     TooShort,
@@ -1786,5 +1835,100 @@ mod tests {
 
     fn ptr_sentinel() -> *mut u8 {
         std::ptr::dangling_mut()
+    }
+
+    #[test]
+    fn chunk_payload_returns_sfi0_and_psv0_bytes() {
+        let sfi0: [u8; 8] = [0x00, 0x40, 0, 0, 0, 0, 0, 0];
+        let psv0: [u8; 28] = [
+            24, 0, 0, 0, // info_size = 24
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, // lanes_min
+            64, 0, 0, 0, // lanes_max
+        ];
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &sfi0), (b"PSV0", &psv0)]);
+        let info = inspect_dxbc(&blob).expect("valid container");
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), Some(sfi0.as_slice()));
+        assert_eq!(info.chunk_payload(&blob, b"PSV0"), Some(psv0.as_slice()));
+        assert!(info.has_chunk_tag(b"SFI0"));
+        assert!(info.has_chunk_tag(b"PSV0"));
+    }
+
+    #[test]
+    fn chunk_payload_rejects_declared_size_past_container() {
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &[1, 2, 3, 4])]);
+        let mut info = inspect_dxbc(&blob).expect("valid container");
+
+        // A declared size that runs past container_size must yield None, not
+        // a panic and not a slice clipped to the container.
+        info.chunks[0].size = u32::MAX;
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), None);
+        // Presence without trusting the size still holds.
+        assert!(info.has_chunk_tag(b"SFI0"));
+
+        // A forged public ChunkInfo must not treat the DXBC header or offset
+        // table as a chunk header.
+        info.chunks[0].size = 4;
+        info.chunks[0].offset = 0;
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), None);
+
+        // A header offset past the container must also yield None.
+        info.chunks[0].offset = u32::MAX;
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), None);
+
+        // A chunk header that would end exactly one byte past the container.
+        info.chunks[0].offset = info.container_size - 7;
+        info.chunks[0].size = 0;
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), None);
+    }
+
+    #[test]
+    fn chunk_payload_absent_fourcc() {
+        let blob = synthetic_dxil_blob();
+        let info = inspect_dxbc(&blob).expect("valid");
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), None);
+        assert!(!info.has_chunk_tag(b"SFI0"));
+    }
+
+    #[test]
+    fn chunk_payload_zero_size_returns_empty_slice() {
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &[])]);
+        let info = inspect_dxbc(&blob).expect("valid");
+        assert!(info.has_chunk_tag(b"SFI0"));
+        let payload = info.chunk_payload(&blob, b"SFI0");
+        assert_eq!(payload, Some(&[][..]));
+    }
+
+    #[test]
+    fn chunk_payload_exact_fit_at_container_end() {
+        let payload = [0xAA, 0xBB, 0xCC, 0xDD];
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &payload)]);
+        let info = inspect_dxbc(&blob).expect("valid");
+        // The chunk is the last thing in the container; payload ends exactly
+        // at container_size.
+        let chunk = &info.chunks[0];
+        assert_eq!(
+            u64::from(chunk.offset) + 8 + u64::from(chunk.size),
+            u64::from(info.container_size)
+        );
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn chunk_payload_truncated_container_slice() {
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &[1, 2, 3, 4, 5, 6, 7, 8])]);
+        let info = inspect_dxbc(&blob).expect("valid");
+        // Pass a slice shorter than container_size.
+        let short = &blob[..blob.len() - 4];
+        assert_eq!(info.chunk_payload(short, b"SFI0"), None);
+    }
+
+    #[test]
+    fn chunk_payload_first_duplicate_wins() {
+        let first = [0x11, 0x22];
+        let second = [0x33, 0x44, 0x55];
+        let blob = build_synthetic_dxbc(&[(b"SFI0", &first), (b"SFI0", &second)]);
+        let info = inspect_dxbc(&blob).expect("valid");
+        assert_eq!(info.chunks.len(), 2);
+        assert_eq!(info.chunk_payload(&blob, b"SFI0"), Some(first.as_slice()));
     }
 }
