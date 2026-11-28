@@ -105,6 +105,11 @@ constexpr GUID kNetworkingClsid = {0x37E56907, 0x2F10, 0x41E8, {0xB7, 0x2F, 0x36
 constexpr GUID kNetworkingIid = {0xBF2346B2, 0x39AF, 0x4658, {0xB5, 0xEA, 0x44, 0x71, 0x3C, 0x7E, 0x83, 0xB3}};
 constexpr GUID kGameClsid = {0x973A344E, 0x24BF, 0x4D0F, {0x84, 0x57, 0x56, 0xC5, 0x34, 0x89, 0x2B, 0x29}};
 constexpr GUID kGameIid = {0x2549F142, 0x6419, 0x4A06, {0x97, 0xB5, 0x93, 0x1A, 0xAB, 0x7C, 0x2F, 0x34}};
+// XSystemGetAnalyticsInfo and XDisplayTryEnableHdrMode reach the runtime through these keys
+// (from authorized GDK material; see the CHANGELOG). The function contracts are public.
+constexpr GUID kAnalyticsGuid = {0xB884675D, 0xB738, 0x4A9C, {0x81, 0x5D, 0x9A, 0x9A, 0x1E, 0x0C, 0x6C, 0x9B}};
+constexpr GUID kDisplayClsid = {0x03F0FE74, 0xFDD9, 0x4E5C, {0xB6, 0x30, 0xF9, 0x33, 0x9C, 0x47, 0xAC, 0xC5}};
+constexpr GUID kDisplayIid = {0x35F07670, 0x706E, 0x4BFB, {0x94, 0x76, 0x09, 0x07, 0x98, 0xC5, 0xEB, 0xF3}};
 
 bool guid_eq(const GUID& a, const GUID& b) {
     return std::memcmp(&a, &b, sizeof(GUID)) == 0;
@@ -295,6 +300,78 @@ const std::array<const void*, 12> kSystemVtbl = [] {
     return v;
 }();
 ComSingleton kSystemObj{kSystemVtbl.data(), &kSystemIid, "IXSystem"};
+
+// --- XSystemGetAnalyticsInfo (public XSystem.h contract) ---
+
+// Public XVersion: four uint16_t fields in this order, overlaid on a uint64_t.
+struct XVersionLayout {
+    uint16_t major;
+    uint16_t minor;
+    uint16_t build;
+    uint16_t revision;
+};
+// Public XSystemAnalyticsInfo.
+struct XSystemAnalyticsInfoLayout {
+    XVersionLayout osVersion;
+    XVersionLayout hostingOsVersion;
+    char family[64];
+    char form[64];
+};
+static_assert(sizeof(XSystemAnalyticsInfoLayout) == 0x90, "XSystemAnalyticsInfo is 144 bytes");
+
+// Slot 3 returns the structure by value: MSVC passes the result buffer after `this` and
+// returns the same pointer.
+XSystemAnalyticsInfoLayout* WINAPI analytics_get_info(void*, XSystemAnalyticsInfoLayout* out) {
+    if (!out) return out;
+    std::memset(out, 0, sizeof(*out));
+    // BetterXen's own synthetic title and system OS version; not a console build number.
+    out->osVersion = {10, 0, 26100, 0};
+    out->hostingOsVersion = {10, 0, 26100, 0};
+    std::snprintf(out->family, sizeof(out->family), "Xbox");
+    // Series S for the Lockhart profile, Series X for Anaconda (XSystemGetDeviceType 6 / 7).
+    std::snprintf(out->form, sizeof(out->form), "%s",
+                  XSystemGetDeviceType() == 7u ? "Xbox Series X" : "Xbox Series S");
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "family=%s form='%s' os=10.0.26100.0 synthetic=1", out->family,
+                  out->form);
+    bx_log_emit(BX_LOG_INFO, "xgameruntime", "XSystemGetAnalyticsInfo", detail);
+    return out;
+}
+
+const std::array<const void*, 8> kAnalyticsVtbl = [] {
+    auto v = make_default_vtbl<8>();
+    v[3] = reinterpret_cast<const void*>(&analytics_get_info);
+    return v;
+}();
+ComSingleton kAnalyticsObj{kAnalyticsVtbl.data(), &kAnalyticsGuid, "IXSystemAnalytics"};
+
+// --- XDisplayTryEnableHdrMode (public XDisplay.h contract) ---
+
+// Public XDisplayHdrModeInfo.
+struct XDisplayHdrModeInfoLayout {
+    float minToneMapLuminance;
+    float maxToneMapLuminance;
+    float maxFullFrameToneMapLuminance;
+};
+constexpr uint32_t kHdrModeResultDisabled = 2;  // XDisplayHdrModeResult::Disabled
+
+// BetterXen presents SDR through the host swap chain, so HDR is reported as not enabled:
+// a successful Disabled answer, not the failure value Unknown. The output is only meaningful
+// when HDR is enabled, so it is cleared.
+uint32_t WINAPI display_try_enable_hdr(void*, uint32_t preference, XDisplayHdrModeInfoLayout* info) {
+    if (info) std::memset(info, 0, sizeof(*info));
+    char detail[96];
+    std::snprintf(detail, sizeof(detail), "preference=%u result=disabled reason=sdr_presentation", preference);
+    bx_log_emit(BX_LOG_INFO, "xgameruntime", "XDisplayTryEnableHdrMode", detail);
+    return kHdrModeResultDisabled;
+}
+
+const std::array<const void*, 8> kDisplayVtbl = [] {
+    auto v = make_default_vtbl<8>();
+    v[4] = reinterpret_cast<const void*>(&display_try_enable_hdr);
+    return v;
+}();
+ComSingleton kDisplayObj{kDisplayVtbl.data(), &kDisplayIid, "IXDisplay"};
 
 // --- XError ---
 
@@ -801,6 +878,8 @@ const PublicEntry kPublicEntries[] = {
     {&kCoreGuid, &kCoreGuid, &kCoreObj},
     {&kFeatureGuid, &kFeatureGuid, &kFeatureObj},
     {&kSystemClsid, &kSystemIid, &kSystemObj},
+    {&kAnalyticsGuid, &kAnalyticsGuid, &kAnalyticsObj},
+    {&kDisplayClsid, &kDisplayIid, &kDisplayObj},
     {&kErrorGuid, &kErrorGuid, &kErrorObj},
     {&kPlsClsid, &kPlsIid, &kPlsObj},
     {&kUserClsid, &kUserClsid, &kUserObj},
