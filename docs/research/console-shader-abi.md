@@ -41,7 +41,7 @@ Each probe is a `cs_6_5` compute shader (`cs_6_6` for the 64-bit atomic) with an
 **Root buffer access.** For a root SRV, UAV or CBV, the shader builds the buffer descriptor itself from the root address:
 - **Stride:** in word 1, bits 16 and up, taken from the element type: 4 bytes for `uint`, 8 for `uint64_t`, 16 for the root CBV.
 - **Record count:** `-1`, so accesses through root descriptors are not bounds-checked.
-- **Word 3:** the constant `0x11014fac` in every probe.
+- **Word 3:** the constant `0x11014fac` in every probe. That value is from the PIX shader compiler's listing (its NewBE code generator). The ACO compiler path (`xdxc`), which emits the ACCC containers titles ship, generates different code for the same HLSL, and its word 3 is `0x31016fac` ([#647](https://github.com/MacosPorters/betterxen/pull/647)). These observations describe the NewBE path; register placement (the root UAV in `s[4:5]`) agreed in #647's ACO outputs.
 
 **Descriptor tables.** Descriptors are loaded from the table address:
 - buffer descriptors 32 bytes apart (p03 loads at offsets `0` and `0x20`);
