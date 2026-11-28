@@ -191,6 +191,20 @@ pub struct BreakpointException {
     pub module: Option<String>,
     pub module_base: Option<String>,
     pub rva: Option<String>,
+    /// 1-based index of this record and the per-process cap, so a reader can tell a run
+    /// that hit the cap (later breakpoints not recorded) from one that stopped short of it.
+    pub record: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+fn extract_json_u32(line: &str, key: &str) -> Option<u32> {
+    let needle = format!("\"{key}\":");
+    let start = line.find(&needle)? + needle.len();
+    let digits: &str = &line[start..];
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok()
 }
 
 fn extract_json_str<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -361,6 +375,8 @@ pub fn summarize_jsonl(input: &str) -> TraceSummary {
                     module: extract_json_str(trimmed, "module").map(str::to_owned),
                     module_base: extract_json_str(trimmed, "module_base").map(str::to_owned),
                     rva: extract_json_str(trimmed, "rva").map(str::to_owned),
+                    record: extract_json_u32(trimmed, "record"),
+                    limit: extract_json_u32(trimmed, "limit"),
                 });
             }
             "unimpl_api" => *summary.unimpl_apis.entry(detail.to_string()).or_insert(0) += 1,
@@ -455,12 +471,16 @@ mod tests {
                     module: Some("title.exe".into()),
                     module_base: Some("0x0000000140000000".into()),
                     rva: Some("0x0000000002236178".into()),
+                    record: Some(1),
+                    limit: Some(16),
                 },
                 BreakpointException {
                     exception_code: Some("0xc0000420".into()),
                     module: Some("?".into()),
                     module_base: Some("0x0000000000000000".into()),
                     rva: Some("0x0000000000000000".into()),
+                    record: Some(2),
+                    limit: Some(16),
                 },
             ]
         );

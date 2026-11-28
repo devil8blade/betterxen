@@ -392,6 +392,15 @@ fn render_trace(text: &str) -> String {
                 hit.module_base.as_deref().unwrap_or("unknown"),
             );
         }
+        if let Some(last) = summary.breakpoint_exceptions.last()
+            && let (Some(record), Some(limit)) = (last.record, last.limit)
+            && record >= limit
+        {
+            let _ = writeln!(
+                out,
+                "  cap of {limit} records reached; later breakpoints were not recorded"
+            );
+        }
     }
     if !summary.unimpl_apis.is_empty() {
         let _ = writeln!(out, "\nUnimplemented APIs:");
@@ -1679,6 +1688,22 @@ sub setup_bottle_wineprefix {
             "{rendered}"
         );
         assert!(!rendered.contains("Unhandled exceptions"), "{rendered}");
+        assert!(
+            !rendered.contains("cap of"),
+            "one of 16 records is not the cap: {rendered}"
+        );
+    }
+
+    #[test]
+    fn notes_when_the_breakpoint_record_cap_is_reached() {
+        let log = r#"{"ts_ms":5,"tid":7,"level":"WARN","sub":"runtime_veh","event":"breakpoint_exception","exception_code":"0x80000003","module":"title.exe","module_base":"0x0000000140000000","rva":"0x10","address":"0x0000000140000010","record":15,"limit":16}
+{"ts_ms":6,"tid":7,"level":"WARN","sub":"runtime_veh","event":"breakpoint_exception","exception_code":"0x80000003","module":"title.exe","module_base":"0x0000000140000000","rva":"0x10","address":"0x0000000140000010","record":16,"limit":16}
+"#;
+        let rendered = render_trace(log);
+        assert!(
+            rendered.contains("  cap of 16 records reached; later breakpoints were not recorded\n"),
+            "{rendered}"
+        );
     }
 
     #[test]

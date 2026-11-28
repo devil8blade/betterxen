@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <intrin.h>
 
 #include "bx_config.h"
@@ -361,9 +362,11 @@ LONG WINAPI log_unhandled_exception(PEXCEPTION_POINTERS ep) {
 }
 
 // A guest with its own crash reporter replaces the top-level filter installed at attach, so
-// log_unhandled_exception never sees its assertions. The vectored handler runs before any
-// guest handler: it records breakpoints and assertion failures with their module offset. They
-// are first-chance, so the guest may still handle them; handling is left unchanged.
+// log_unhandled_exception never sees its assertions. The vectored handler runs before the
+// guest's top-level filter and before any vectored handler the guest registers last; a handler
+// the guest registers first can resume the exception before this one sees it. It records
+// breakpoints and assertion failures with their module offset. They are first-chance, so the
+// guest may still handle them; handling is left unchanged.
 void log_breakpoint(const EXCEPTION_RECORD& record) {
     const uint32_t index = g_breakpoint_records.fetch_add(1, std::memory_order_relaxed) + 1;
     if (index > kMaxBreakpointRecords) {
@@ -376,12 +379,17 @@ void log_breakpoint(const EXCEPTION_RECORD& record) {
     if (VirtualQuery(record.ExceptionAddress, &region, sizeof(region)) &&
         region.Type == MEM_IMAGE) {
         module_base = reinterpret_cast<uintptr_t>(region.AllocationBase);
-        char path[MAX_PATH];
+        // Wide API plus an explicit UTF-8 conversion: the ANSI form returns the name in the
+        // active code page, which would make a non-ASCII module name invalid UTF-8 in the JSON.
+        wchar_t path[MAX_PATH];
         const DWORD length =
-            GetModuleFileNameA(reinterpret_cast<HMODULE>(module_base), path, MAX_PATH);
+            GetModuleFileNameW(reinterpret_cast<HMODULE>(module_base), path, MAX_PATH);
         if (length > 0 && length < MAX_PATH) {
-            const char* slash = std::strrchr(path, '\\');
-            std::snprintf(module, sizeof(module), "%s", slash ? slash + 1 : path);
+            const wchar_t* slash = std::wcsrchr(path, L'\\');
+            const wchar_t* name = slash ? slash + 1 : path;
+            if (WideCharToMultiByte(CP_UTF8, 0, name, -1, module, sizeof(module), nullptr, nullptr) == 0) {
+                std::snprintf(module, sizeof(module), "?");
+            }
         }
     }
 
